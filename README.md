@@ -1,4 +1,4 @@
-# cll-ts
+# capsule-ledger-ts
 
 An embeddable TypeScript Checkpointed Local Log. It maintains the MMR, signs
 checkpoint COSE statements, verifies proofs and receipts, and durably retries
@@ -13,7 +13,7 @@ An independent backend implements the exported `Store` interface and must
 preserve those same semantics.
 
 ```ts
-import { LedgerService, SqliteStore } from "cll-ts";
+import { LedgerService, SqliteStore } from "capsule-ledger-ts";
 
 const store = SqliteStore.open("ledger.sqlite", "example-log");
 const ledger = new LedgerService(store);
@@ -50,7 +50,7 @@ import {
   CheckpointRunner,
   ReceiptVerifier,
   WitnessDeliveryRunner,
-} from "cll-ts";
+} from "capsule-ledger-ts";
 
 const abort = new AbortController();
 const checkpointRunner = new CheckpointRunner(store, {

@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { path: cll-ts }
+        with: { path: capsule-ledger-ts }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { repository: ethanyzhang/capsule-emit-ts, path: capsule-emit-ts }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -19,13 +19,13 @@ jobs:
           {
             node-version: 24,
             cache: npm,
-            cache-dependency-path: cll-ts/package-lock.json,
+            cache-dependency-path: capsule-ledger-ts/package-lock.json,
           }
       - run: npm ci && npm run build
         working-directory: capsule-emit-ts
       - run: npm ci
-        working-directory: cll-ts
+        working-directory: capsule-ledger-ts
       - run: npm run check
-        working-directory: cll-ts
+        working-directory: capsule-ledger-ts
       - run: npm run build
-        working-directory: cll-ts
+        working-directory: capsule-ledger-ts

@@ -1,10 +1,10 @@
-# cll-ts design
+# capsule-ledger-ts design
 
 Status: implementation contract for the initial TypeScript release.
 
 ## Purpose and ownership
 
-`cll-ts` is an embeddable ESM-first TypeScript Checkpointed Local Log aligned
+`capsule-ledger-ts` is an embeddable ESM-first TypeScript Checkpointed Local Log aligned
 with the IETF CLL draft and the `checkpointed-local-log` 0.1.0 reference
 package. It owns the MMR, proofs, checkpoint signing, exact-byte persistence,
 and durable witness delivery. Its current AAC ledger binding owns admission

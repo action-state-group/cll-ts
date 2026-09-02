@@ -1,5 +1,5 @@
 {
-  "name": "cll-ts",
+  "name": "capsule-ledger-ts",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "TypeScript Checkpointed Local Log with MMR proofs, signed checkpoints, durable stores, and an AAC ledger binding",
