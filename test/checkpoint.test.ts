@@ -9,10 +9,72 @@ import {
   WitnessDeliveryRunner,
   signCheckpoint,
   verifyCheckpoint,
+  type CllEntry,
   type WitnessClient,
 } from "../src/index.js";
 
+class GenericMemoryStore extends MemoryStore {
+  public constructor(private readonly genericEntries: readonly CllEntry[]) {
+    super();
+  }
+
+  public override async scanEntries(after: bigint, limit: number) {
+    return this.genericEntries
+      .filter((entry) => entry.seq > after)
+      .slice(0, limit)
+      .map((entry) => ({
+        ...entry,
+        value: Uint8Array.from(entry.value),
+        appendedAt: new Date(entry.appendedAt),
+      }));
+  }
+}
+
 describe("checkpoint COSE", () => {
+  it("indexes an application-neutral CLL source", async () => {
+    const appendedAt = new Date("2026-09-02T12:00:00Z");
+    const store = new GenericMemoryStore([
+      {
+        seq: 1n,
+        value: Uint8Array.from({ length: 32 }, () => 0x42),
+        appendedAt,
+      },
+    ]);
+    const identity = createEd25519Identity(
+      Buffer.from(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hex",
+      ),
+    );
+    const runner = new CheckpointRunner(store, {
+      logId: "generic-log",
+      identity,
+      entryCadence: 1,
+      clock: () => appendedAt,
+    });
+
+    const checkpoint = await runner.runOnce();
+    expect(checkpoint).toBeDefined();
+    expect((await store.loadCll()).indexedSeq).toBe(1n);
+  });
+
+  it("rejects a generic CLL entry without a valid append time", async () => {
+    const store = new GenericMemoryStore([
+      {
+        seq: 1n,
+        value: Uint8Array.from({ length: 32 }, () => 0x42),
+        appendedAt: new Date(Number.NaN),
+      },
+    ]);
+    const identity = createEd25519Identity(Buffer.alloc(32));
+    const runner = new CheckpointRunner(store, {
+      logId: "invalid-time-log",
+      identity,
+    });
+
+    await expect(runner.runOnce()).rejects.toMatchObject({ code: "corrupt" });
+  });
+
   it("signs a self-verifying first checkpoint", () => {
     const tree = new MmrTree();
     tree.appendCapsuleId("11".repeat(32));

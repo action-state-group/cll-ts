@@ -7,6 +7,7 @@ import {
   MmrTree,
   verifyConsistency,
   verifyInclusion,
+  verifyInclusionValue,
 } from "../src/index.js";
 
 const commitmentVectors = JSON.parse(
@@ -48,6 +49,36 @@ describe("CLL MMR", () => {
       else expect(actual).not.toBe(vector.commitment_hex);
     });
   }
+  it("appends application-neutral entry bytes and rejects empty values", () => {
+    const generic = new MmrTree();
+    const compatible = new MmrTree();
+    const value = Uint8Array.from({ length: 32 }, () => 0x11);
+
+    expect(generic.append(value)).toBe(1n);
+    expect(compatible.appendCapsuleId("11".repeat(32))).toBe(1n);
+    expect(generic.root()).toEqual(compatible.root());
+    expect(
+      verifyInclusionValue(
+        generic.root(),
+        generic.size,
+        0n,
+        value,
+        generic.inclusionProof(0n),
+      ),
+    ).toBe(true);
+    expect(
+      verifyInclusionValue(
+        generic.root(),
+        generic.size,
+        0n,
+        Uint8Array.of(1),
+        generic.inclusionProof(0n),
+      ),
+    ).toBe(false);
+    expect(() => generic.append(new Uint8Array())).toThrow(
+      "CLL leaf value must be exactly 32 bytes",
+    );
+  });
   it("matches Python roots and DataTrails bagged proofs", () => {
     const tree = new MmrTree();
     const ids: string[] = [];

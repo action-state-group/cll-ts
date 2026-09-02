@@ -1,4 +1,9 @@
-import { LedgerError, limits, type Store, type WitnessState } from "./types.js";
+import {
+  LedgerError,
+  limits,
+  type CllStore,
+  type WitnessState,
+} from "./types.js";
 import { verifyCheckpoint } from "./checkpoint.js";
 import { waitForInterval } from "./run-loop.js";
 
@@ -159,7 +164,7 @@ export class WitnessDeliveryRunner {
   private running = false;
 
   public constructor(
-    private readonly store: Store,
+    private readonly store: CllStore,
     private readonly clients: ReadonlyMap<string, WitnessClient>,
     options: WitnessDeliveryRunnerOptions,
   ) {

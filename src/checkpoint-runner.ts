@@ -12,7 +12,7 @@ import {
   limits,
   validateIdentifier,
   type CllState,
-  type Store,
+  type CheckpointStore,
   type WitnessState,
 } from "./types.js";
 
@@ -34,7 +34,7 @@ export class CheckpointRunner {
   private tail: Promise<void> = Promise.resolve();
   private running = false;
   public constructor(
-    private readonly store: Store,
+    private readonly store: CheckpointStore,
     private readonly options: CheckpointRunnerOptions,
   ) {
     validateIdentifier(options.logId);
@@ -165,12 +165,14 @@ export class CheckpointRunner {
     let cursor = current.indexedSeq;
     let firstPendingAt = current.firstPendingAt;
     while (true) {
-      const entries = await this.store.scanIds(cursor, limits.scanMax);
+      const entries = await this.store.scanEntries(cursor, limits.scanMax);
       if (entries.length === 0) break;
       for (const entry of entries) {
         if (entry.seq !== cursor + 1n)
-          throw new LedgerError("corrupt", "ledger sequence is not contiguous");
-        tree.appendCapsuleId(entry.capsuleId);
+          throw new LedgerError("corrupt", "CLL sequence is not contiguous");
+        if (!Number.isFinite(entry.appendedAt.getTime()))
+          throw new LedgerError("corrupt", "CLL entry append time is invalid");
+        tree.append(entry.value);
         cursor = entry.seq;
         firstPendingAt ??= entry.appendedAt;
       }

@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/ethanyzhang/capsule-ledger-go/ledger"
-	gojsonl "github.com/ethanyzhang/capsule-ledger-go/store/jsonl"
+	"github.com/ethanyzhang/cll-go/ledger"
+	gojsonl "github.com/ethanyzhang/cll-go/store/jsonl"
 )
 
 func main() {

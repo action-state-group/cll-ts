@@ -178,8 +178,14 @@ export class MmrTree {
       throw new TypeError(
         "capsule id must be 64 lowercase hexadecimal characters",
       );
+    return this.append(Buffer.from(capsuleId, "hex"));
+  }
+  /** Commit an application-neutral 32-byte record identity as the next CLL leaf. */
+  public append(value: Uint8Array): bigint {
+    if (value.length !== 32)
+      throw new TypeError("CLL leaf value must be exactly 32 bytes");
     let position = this.nodes_.length;
-    this.nodes_.push(sha(Uint8Array.of(0), Buffer.from(capsuleId, "hex")));
+    this.nodes_.push(sha(Uint8Array.of(0), value));
     this.meta.push({ height: 0 });
     this.leafPositions.push(position);
     while (
@@ -306,13 +312,30 @@ export function verifyInclusion(
   capsuleId: string,
   proof: readonly Uint8Array[],
 ): boolean {
+  if (!/^[0-9a-f]{64}$/u.test(capsuleId)) return false;
+  return verifyInclusionValue(
+    root,
+    mmrSize,
+    leafIndex,
+    Buffer.from(capsuleId, "hex"),
+    proof,
+  );
+}
+
+export function verifyInclusionValue(
+  root: Uint8Array,
+  mmrSize: bigint,
+  leafIndex: bigint,
+  entryValue: Uint8Array,
+  proof: readonly Uint8Array[],
+): boolean {
   const leaves = leafCount(mmrSize);
   if (
     !validHash(root) ||
     leaves === undefined ||
     leafIndex < 0n ||
     leafIndex >= leaves ||
-    !/^[0-9a-f]{64}$/u.test(capsuleId) ||
+    entryValue.length !== 32 ||
     proof.some((item) => !validHash(item))
   )
     return false;
@@ -325,7 +348,7 @@ export function verifyInclusion(
   if (peakIndex < 0) return false;
   const path = pathToPeak(layout[peakIndex]!, Number(leafIndex), 1);
   if (path === undefined) return false;
-  let value = sha(Uint8Array.of(0), Buffer.from(capsuleId, "hex"));
+  let value = sha(Uint8Array.of(0), entryValue);
   let cursor = 0;
   for (const step of path) {
     const sibling = proof[cursor++];

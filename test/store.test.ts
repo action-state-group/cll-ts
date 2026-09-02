@@ -45,12 +45,44 @@ async function contract(store: Store): Promise<void> {
   expect(new Set([a.seq, b.seq])).toEqual(new Set([1n, 2n]));
   expect((await service.append("unsigned", first.json)).seq).toBe(a.seq);
   expect((await service.scan()).map((record) => record.seq)).toEqual([1n, 2n]);
+  const entries = await store.scanEntries(0n, 2);
+  expect(entries.map((entry) => entry.seq)).toEqual([1n, 2n]);
+  expect(Buffer.from(entries[0]!.value).toString("hex")).toBe(first.capsuleId);
+  expect(Buffer.from(entries[1]!.value).toString("hex")).toBe(second.capsuleId);
+  entries[0]!.value[0] = entries[0]!.value[0]! ^ 0xff;
+  expect(
+    Buffer.from((await store.scanEntries(0n, 1))[0]!.value).toString("hex"),
+  ).toBe(first.capsuleId);
   const copy = await service.get(first.capsuleId);
   copy.capsule[0] = 0;
   expect((await service.get(first.capsuleId)).capsule[0]).not.toBe(0);
 }
 describe("shared backend contract", () => {
   it("memory", () => contract(new MemoryStore()));
+
+  it.each(["not-a-capsule-id", "A".repeat(64)])(
+    "rejects corrupt Capsule ID %s during CLL projection",
+    async (capsuleId) => {
+      class CorruptProjectionStore extends MemoryStore {
+        public override async scanIds() {
+          return [
+            {
+              seq: 1n,
+              capsuleId,
+              appendedAt: new Date("2026-09-01T12:00:00Z"),
+            },
+          ];
+        }
+      }
+
+      const store = new CorruptProjectionStore();
+      stores.push(store);
+      await expect(store.scanEntries(0n, 1)).rejects.toMatchObject({
+        code: "corrupt",
+      } satisfies Partial<LedgerError>);
+    },
+  );
+
   it("rejects non-append-only CLL transitions", async () => {
     const store = new MemoryStore();
     stores.push(store);

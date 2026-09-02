@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { path: capsule-ledger-ts }
+        with: { path: cll-ts }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { repository: ethanyzhang/capsule-emit-ts, path: capsule-emit-ts }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -14,18 +14,45 @@ jobs:
           repository: action-state-group/checkpointed-local-log
           ref: f0f60baec7b19a2288de18283ffb715da0cdcd9c
           path: checkpointed-local-log
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ethanyzhang/cll-go
+          ref: 6cea71f1c062379e048550765f4c94bcb6444668
+          path: cll-go
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           {
             node-version: 24,
             cache: npm,
-            cache-dependency-path: capsule-ledger-ts/package-lock.json,
+            cache-dependency-path: cll-ts/package-lock.json,
           }
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cll-go/go.mod
+          cache-dependency-path: cll-go/go.sum
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with: { python-version: "3.12" }
       - run: npm ci && npm run build
         working-directory: capsule-emit-ts
       - run: npm ci
-        working-directory: capsule-ledger-ts
+        working-directory: cll-ts
       - run: npm run check
-        working-directory: capsule-ledger-ts
+        working-directory: cll-ts
       - run: npm run build
-        working-directory: capsule-ledger-ts
+        working-directory: cll-ts
+      - name: Verify Go, TypeScript, and Python checkpoint interoperability
+        shell: bash
+        run: |
+          interop_dir=$(mktemp -d)
+          trap 'rm -rf "$interop_dir"' EXIT
+          python -m pip install ./checkpointed-local-log
+
+          node cll-ts/test/interop/checkpoint.mjs write "$interop_dir/ts.cose"
+          go -C cll-go run ../cll-ts/test/interop/go-checkpoint/main.go verify "$interop_dir/ts.cose"
+
+          go -C cll-go run ../cll-ts/test/interop/go-checkpoint/main.go write "$interop_dir/go.cose"
+          node cll-ts/test/interop/checkpoint.mjs verify "$interop_dir/go.cose"
+
+          python cll-ts/test/interop/verify_checkpoint.py "$interop_dir/ts.cose"
+          python cll-ts/test/interop/verify_checkpoint.py "$interop_dir/go.cose"
+          cmp "$interop_dir/ts.cose" "$interop_dir/go.cose"

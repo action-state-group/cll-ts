@@ -164,6 +164,20 @@ export class MemoryStore implements Store {
       ({ seq, capsuleId, appendedAt }) => ({ seq, capsuleId, appendedAt }),
     );
   }
+  /** Project AAC Capsule IDs into application-neutral CLL leaf bytes. */
+  public async scanEntries(after: bigint, limit: number) {
+    return (await this.scanIds(after, limit)).map(
+      ({ seq, capsuleId, appendedAt }) => {
+        if (!hex64.test(capsuleId))
+          throw new LedgerError("corrupt", "stored Capsule ID is invalid");
+        return {
+          seq,
+          value: Uint8Array.from(Buffer.from(capsuleId, "hex")),
+          appendedAt,
+        };
+      },
+    );
+  }
   public async findChainGaps() {
     this.ensureOpen();
     return this.records

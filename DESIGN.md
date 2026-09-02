@@ -1,13 +1,14 @@
-# capsule-ledger-ts design
+# cll-ts design
 
 Status: implementation contract for the initial TypeScript release.
 
 ## Purpose and ownership
 
-`capsule-ledger-ts` is an embeddable ESM-first TypeScript Checkpointed Local Log aligned
+`cll-ts` is an embeddable ESM-first TypeScript Checkpointed Local Log aligned
 with the IETF CLL draft and the `checkpointed-local-log` 0.1.0 reference
 package. It owns the MMR, proofs, checkpoint signing, exact-byte persistence,
-and durable witness delivery. Its current AAC ledger binding owns admission
+and durable witness delivery with an application-neutral ordered entry
+projection. Its AAC ledger binding owns admission
 verification and gapless local sequence allocation. It does not own application
 effects, outboxes, producer signer authorization, policy, guards, folds, agent
 status, or viewers.
@@ -16,7 +17,7 @@ status, or viewers.
 
 | Repository               | Synchronized revision                      | Use                                                           |
 | ------------------------ | ------------------------------------------ | ------------------------------------------------------------- |
-| `capsule-ledger-go`      | `262de9704385303bcd2a9522e90bcd7a60b2786c` | Required store, ledger, CLL, checkpoint, and witness behavior |
+| `cll-go`                 | `262de9704385303bcd2a9522e90bcd7a60b2786c` | Required store, ledger, CLL, checkpoint, and witness behavior |
 | `capsule-emit-go`        | `280596e03070d6c3333224313fd6aa20b0cb992a` | Current Capsule and Producer Envelope boundary                |
 | `agent-action-capsule`   | `7e112c8b877ad79d4d2a53be7b522a63470a2b1d` | Frozen format-4 verification and envelope corpora             |
 | `capsule-emit`           | `40b592192e19622ff7a8c82674eb7caddb52e8db` | Released 0.7.0 producer and compatibility surface             |
@@ -33,7 +34,7 @@ status, or viewers.
 | `Service.AddEnvelope`                    | `LedgerService.addEnvelope`                             | Verify and deduplicate exact envelope bytes without allocating sequence or MMR leaf                                                                                                   | Multiple signers and duplicate add                                                 | Authenticity upgrade                       |
 | `Service.Audit`                          | `LedgerService.audit`                                   | All-or-nothing whole-ledger verification under a positive caller bound; rejects if any record lies beyond it; preserves attribution and store-level chain findings                    | Invalid and exceeded bounds, decode failure, missing parent, concurrent supersedes | Unbounded operator scans                   |
 | `NewAACVerifier` and registry extensions | `verifyClass1` and `LedgerService` `registryExtensions` | Pinned complete baseline plus additive application values; preserves informational findings                                                                                           | Baseline drift and extension-copy tests                                            | Host replacement of mandatory verification |
-| `Get`/`Scan`/`ScanIDs`                   | `get`/`scan`/`scanIds`                                  | Exact ID lookup and ordered bounded range reads                                                                                                                                       | Empty, bounds, ordering, defensive copies                                          | Prefix lookup                              |
+| `Get`/`Scan`/`ScanIDs`                   | `get`/`scan`/`scanIds` plus `scanEntries`               | Exact AAC lookup plus application-neutral ordered CLL entry projection                                                                                                                | Empty, bounds, ordering, defensive copies                                          | Prefix lookup                              |
 | JSONL store                              | `JsonlStore.open`                                       | Exclusive writer, fsync per complete line, restart replay, torn-tail truncation only                                                                                                  | Restart, partial tail, earlier corruption, lock                                    | Multi-process writers                      |
 | SQLite store                             | `SqliteStore.open`                                      | WAL, foreign keys, immediate transactions, log-scoped uniqueness                                                                                                                      | Persistence and two-handle allocation                                              | Distributed sequencing                     |
 | MySQL store                              | `MysqlStore.open`                                       | Metadata row lock, parameterized transactions, log-scoped uniqueness                                                                                                                  | MySQL 8 Testcontainer and concurrent allocation                                    | Provisioning databases                     |
@@ -51,7 +52,8 @@ status, or viewers.
 
 `Store` is the public behavior contract for every backend. It contains:
 
-- `append`, `addEnvelope`, `get`, `scan`, `scanIds`, and `findChainGaps`;
+- `append`, `addEnvelope`, `get`, `scan`, `scanIds`, `scanEntries`, and
+  `findChainGaps`;
 - `loadCll`, `commitCll`, `pendingWitnesses`, `getWitness`, and
   `commitWitness`;
 - `close`.
@@ -119,17 +121,21 @@ between a mutation and its persistence callback.
 
 ## CLL and MMR
 
-The leaf-domain decision is fixed:
+The generic leaf-domain decision is fixed to 32-byte record identities. Fixed
+width preserves leaf/interior domain separation while retaining existing
+vectors:
 
 ```text
-leaf   = SHA256(0x00 || bytes.fromhex(capsule_id))
+leaf   = SHA256(0x00 || entry_value_32)
 parent = SHA256(be64(parent_position + 1) || left || right)
 root   = bag peaks right-to-left with SHA256(right || left)
 ```
 
-`mmr_size` counts all MMR nodes. The empty root is 32 zero bytes. Producer
-Envelopes never become leaves. Changing this rule requires a new log profile,
-not a backend edit.
+The AAC binding sets `entry_value_32 = bytes.fromhex(capsule_id)`, preserving every
+existing Go/Python vector. `mmr_size` counts all MMR nodes. The empty root is 32
+zero bytes. Producer Envelopes never become leaves. Changing the generic rule
+or an application profile's entry encoding requires a new log profile, not a
+backend edit.
 
 ## Checkpoint wire contract
 

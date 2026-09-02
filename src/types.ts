@@ -45,6 +45,12 @@ export interface LogEntry {
   readonly capsuleId: string;
   readonly appendedAt: Date;
 }
+/** One dense, 1-based CLL entry with a 32-byte identity and valid append time. */
+export interface CllEntry {
+  readonly seq: bigint;
+  readonly value: Uint8Array;
+  readonly appendedAt: Date;
+}
 export interface ChainGap {
   readonly seq: bigint;
   readonly capsuleId: string;
@@ -80,17 +86,12 @@ export interface CllState {
   readonly checkpointPeaks?: readonly Uint8Array[];
   readonly witnesses: readonly WitnessState[];
 }
-export interface Store {
-  append(
-    input: AppendInput,
-  ): Promise<{ readonly record: Record; readonly outcome: AppendOutcome }>;
-  addEnvelope(
-    input: EnvelopeInput,
-  ): Promise<{ readonly envelope: Envelope; readonly outcome: AddOutcome }>;
-  get(capsuleId: string): Promise<Record>;
-  scan(after: bigint, limit: number): Promise<readonly Record[]>;
-  scanIds(after: bigint, limit: number): Promise<readonly LogEntry[]>;
-  findChainGaps(): Promise<readonly ChainGap[]>;
+/** Bounded application-neutral source consumed by checkpointing. */
+export interface CllSource {
+  scanEntries(after: bigint, limit: number): Promise<readonly CllEntry[]>;
+}
+/** Durable CLL state independent of an application's record API. */
+export interface CllStore {
   loadCll(): Promise<CllState>;
   commitCll(
     expectedSize: bigint,
@@ -103,6 +104,21 @@ export interface Store {
     checkpointSize: bigint,
   ): Promise<WitnessState | undefined>;
   commitWitness(expectedAttempts: number, next: WitnessState): Promise<void>;
+}
+export interface CheckpointStore extends CllSource, CllStore {}
+
+/** AAC ledger binding plus the generic CLL contracts. */
+export interface Store extends CheckpointStore {
+  append(
+    input: AppendInput,
+  ): Promise<{ readonly record: Record; readonly outcome: AppendOutcome }>;
+  addEnvelope(
+    input: EnvelopeInput,
+  ): Promise<{ readonly envelope: Envelope; readonly outcome: AddOutcome }>;
+  get(capsuleId: string): Promise<Record>;
+  scan(after: bigint, limit: number): Promise<readonly Record[]>;
+  scanIds(after: bigint, limit: number): Promise<readonly LogEntry[]>;
+  findChainGaps(): Promise<readonly ChainGap[]>;
   close(): Promise<void>;
 }
 
