@@ -25,6 +25,9 @@ status, or viewers.
 | `capsule-ledger`         | `1a48c2adfd6018b1a5153824b4b389f8e7471fb7` | Python ledger semantics and excluded control-plane boundary   |
 | `capsule-anchor`         | `8207b79ce2dd3eb1fce105d52162959e1d5aa680` | Current `/checkpoints` route and receipt contract             |
 
+These revisions record the implementation baseline. CI interoperability jobs
+intentionally test the current change against each peer repository's `main`.
+
 ## Parity matrix
 
 | Go capability                            | TypeScript API                                          | Wire or durable behavior                                                                                                                                                              | Required coverage                                                                  | Intentional exclusion                      |
