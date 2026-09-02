@@ -1,0 +1,31 @@
+name: CI
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { path: cll-ts }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { repository: ethanyzhang/capsule-emit-ts, path: capsule-emit-ts }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: action-state-group/checkpointed-local-log
+          ref: f0f60baec7b19a2288de18283ffb715da0cdcd9c
+          path: checkpointed-local-log
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          {
+            node-version: 24,
+            cache: npm,
+            cache-dependency-path: cll-ts/package-lock.json,
+          }
+      - run: npm ci && npm run build
+        working-directory: capsule-emit-ts
+      - run: npm ci
+        working-directory: cll-ts
+      - run: npm run check
+        working-directory: cll-ts
+      - run: npm run build
+        working-directory: cll-ts
