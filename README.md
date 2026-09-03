@@ -123,12 +123,12 @@ const mysql = await MysqlStore.open(process.env.MYSQL_URL!, "example-log");
 `SqliteStore.open()` and `MysqlStore.open()` create the same four
 library-owned tables when they do not already exist:
 
-| Table | Purpose |
-| --- | --- |
-| `cll_meta` | Log-level serialized checkpoint and control state |
-| `cll_entries` | Ordered 32-byte record identities and append timestamps |
-| `cll_nodes` | Merkle Mountain Range nodes used by checkpoints |
-| `cll_witnesses` | Durable witness delivery attempts and receipt state |
+| Table           | Purpose                                                 |
+| --------------- | ------------------------------------------------------- |
+| `cll_meta`      | Log-level serialized checkpoint and control state       |
+| `cll_entries`   | Ordered 32-byte record identities and append timestamps |
+| `cll_nodes`     | Merkle Mountain Range nodes used by checkpoints         |
+| `cll_witnesses` | Durable witness delivery attempts and receipt state     |
 
 Every table is scoped by `log_id`, so one database can hold multiple independent
 logs. The caller must provide an existing database and credentials allowed to
