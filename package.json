@@ -1,6 +1,6 @@
 {
   "name": "@action-state-group/cll",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "Apache-2.0",
   "description": "Generic TypeScript Checkpointed Local Log with MMR proofs, checkpoints, witnesses, and durable backends",
   "type": "module",
