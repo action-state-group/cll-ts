@@ -25,6 +25,12 @@ jobs:
           fetch-depth: 0
           path: cll-ts
 
+      - name: Require main branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "npm releases must run from main." >&2
+          exit 1
+
       - name: Check out checkpoint reference main
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -71,18 +77,25 @@ jobs:
 
       - name: Tag published commit
         env:
+          PACKAGE_NAME: ${{ steps.publish.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.publish.outputs.package_version }}
         shell: bash
         run: |
           tag="v$PACKAGE_VERSION"
+          published_git_head=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" gitHead)
+          if [[ -z "$published_git_head" ]]; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION does not expose gitHead." >&2
+            exit 1
+          fi
+
           remote_tag=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")
           if [[ -n "$remote_tag" ]]; then
             git fetch origin "refs/tags/$tag:refs/tags/$tag"
-            test "$(git rev-list -n 1 "$tag")" = "$GITHUB_SHA"
-            echo "$tag already points to this commit."
+            test "$(git rev-list -n 1 "$tag")" = "$published_git_head"
+            echo "$tag already points to the npm-published commit."
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$tag" -m "Release $tag"
+            git tag -a "$tag" -m "Release $tag" "$published_git_head"
             git push origin "refs/tags/$tag"
           fi

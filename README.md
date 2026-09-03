@@ -212,3 +212,21 @@ enforce checkpoint and witness compare-and-swap, detect corrupt state, and make
 `close()` idempotent.
 
 See [DESIGN.md](DESIGN.md) for state and durability invariants.
+
+## Release
+
+Releases are published from `main` with the manual
+[Publish npm package](https://github.com/action-state-group/cll-ts/actions/workflows/publish.yml)
+GitHub Action:
+
+1. Update `version` in `package.json` and `package-lock.json`, commit the change,
+   and wait for `main` CI to pass.
+2. In GitHub, open the workflow, choose **Run workflow**, and select `main`.
+3. Verify the workflow published `@action-state-group/cll` and created the
+   annotated `v<version>` tag on the published commit.
+
+The npm package must have a GitHub Actions trusted publisher configured for
+the `action-state-group/cll-ts` repository and
+`.github/workflows/publish.yml`. No long-lived npm token is required. Re-running
+the workflow is safe: it skips an existing npm version and verifies that its
+Git tag points to the `gitHead` recorded by npm.
