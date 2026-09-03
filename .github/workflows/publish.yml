@@ -79,6 +79,7 @@ jobs:
 
       - name: Tag published commit
         env:
+          GH_TOKEN: ${{ github.token }}
           PACKAGE_NAME: ${{ steps.publish.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.publish.outputs.package_version }}
           PUBLISHED_NOW: ${{ steps.publish.outputs.published_now }}
@@ -101,8 +102,27 @@ jobs:
             test "$(git rev-list -n 1 "$tag")" = "$published_git_head"
             echo "$tag already points to the npm-published commit."
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$tag" -m "Release $tag" "$published_git_head"
-            git push origin "refs/tags/$tag"
+            tag_object_sha=$(
+              jq -n \
+                --arg tag "$tag" \
+                --arg message "Release $tag" \
+                --arg object "$published_git_head" \
+                --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{
+                  tag: $tag,
+                  message: $message,
+                  object: $object,
+                  type: "commit",
+                  tagger: {
+                    name: "github-actions[bot]",
+                    email: "41898282+github-actions[bot]@users.noreply.github.com",
+                    date: $date
+                  }
+                }' |
+                gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" --input - --jq .sha
+            )
+            test -n "$tag_object_sha"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              --field ref="refs/tags/$tag" \
+              --field sha="$tag_object_sha" >/dev/null
           fi
