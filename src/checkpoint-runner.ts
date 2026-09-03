@@ -1,4 +1,3 @@
-import type { SigningIdentity } from "capsule-emit-ts";
 import {
   checkpointMetadata,
   signCheckpoint,
@@ -8,17 +7,18 @@ import {
 import { leafCount, MmrTree } from "./mmr.js";
 import { waitForInterval } from "./run-loop.js";
 import {
-  LedgerError,
+  CllError,
   limits,
   validateIdentifier,
   type CllState,
+  type CheckpointSigningIdentity,
   type CheckpointStore,
   type WitnessState,
 } from "./types.js";
 
 export interface CheckpointRunnerOptions {
   readonly logId: string;
-  readonly identity: SigningIdentity;
+  readonly identity: CheckpointSigningIdentity;
   readonly witnessIds?: readonly string[];
   readonly entryCadence?: number;
   readonly ageCadenceMs?: number;
@@ -62,7 +62,7 @@ export class CheckpointRunner {
   /** Run the host-controlled polling lifecycle until its signal is aborted. */
   public async run(signal: AbortSignal): Promise<void> {
     if (this.running)
-      throw new LedgerError("invalid", "checkpoint runner is already running");
+      throw new CllError("invalid", "checkpoint runner is already running");
     if (signal.aborted) return;
     this.running = true;
     try {
@@ -70,7 +70,7 @@ export class CheckpointRunner {
         try {
           await this.runOnce();
         } catch (error) {
-          if (!(error instanceof LedgerError) || error.code !== "contention")
+          if (!(error instanceof CllError) || error.code !== "contention")
             throw error;
         }
         await waitForInterval(signal, this.pollIntervalMs);
@@ -99,12 +99,12 @@ export class CheckpointRunner {
       current.size !== BigInt(current.nodes.length) ||
       leafCount(current.size) !== current.indexedSeq
     )
-      throw new LedgerError("corrupt", "stored CLL size/index is inconsistent");
+      throw new CllError("corrupt", "stored CLL size/index is inconsistent");
     let tree: MmrTree;
     try {
       tree = new MmrTree(current.nodes);
     } catch (error) {
-      throw new LedgerError("corrupt", "stored CLL nodes are invalid", {
+      throw new CllError("corrupt", "stored CLL nodes are invalid", {
         cause: error,
       });
     }
@@ -118,7 +118,7 @@ export class CheckpointRunner {
       (value) => value !== undefined,
     ).length;
     if (checkpointFieldCount !== 0 && checkpointFieldCount !== 4)
-      throw new LedgerError("corrupt", "stored checkpoint state is incomplete");
+      throw new CllError("corrupt", "stored checkpoint state is incomplete");
     if (
       current.checkpoint !== undefined &&
       current.checkpointSize !== undefined &&
@@ -130,7 +130,7 @@ export class CheckpointRunner {
         current.checkpointSize > current.size ||
         leafCount(current.checkpointSize) !== current.checkpointIndexedSeq
       )
-        throw new LedgerError(
+        throw new CllError(
           "corrupt",
           "stored checkpoint does not match durable CLL state",
         );
@@ -138,7 +138,7 @@ export class CheckpointRunner {
       try {
         expectedPeaks = tree.peakHashesAt(current.checkpointSize);
       } catch (error) {
-        throw new LedgerError("corrupt", "stored checkpoint size is invalid", {
+        throw new CllError("corrupt", "stored checkpoint size is invalid", {
           cause: error,
         });
       }
@@ -157,7 +157,7 @@ export class CheckpointRunner {
         !samePeaks(metadata.peaks, current.checkpointPeaks) ||
         !samePeaks(expectedPeaks, current.checkpointPeaks)
       )
-        throw new LedgerError(
+        throw new CllError(
           "corrupt",
           "stored checkpoint does not match durable CLL state",
         );
@@ -169,9 +169,9 @@ export class CheckpointRunner {
       if (entries.length === 0) break;
       for (const entry of entries) {
         if (entry.seq !== cursor + 1n)
-          throw new LedgerError("corrupt", "CLL sequence is not contiguous");
+          throw new CllError("corrupt", "CLL sequence is not contiguous");
         if (!Number.isFinite(entry.appendedAt.getTime()))
-          throw new LedgerError("corrupt", "CLL entry append time is invalid");
+          throw new CllError("corrupt", "CLL entry append time is invalid");
         tree.append(entry.value);
         cursor = entry.seq;
         firstPendingAt ??= entry.appendedAt;

@@ -1,75 +1,68 @@
 import Database from "better-sqlite3";
-import { realpathSync } from "node:fs";
-import { MemoryStore } from "./memory-store.js";
+import { addedWitnesses, BackendState } from "./backend-state.js";
+import { cloneCll } from "./clone.js";
 import {
-  envelopeToWire,
-  recordToWire,
+  cllToWire,
+  entryToWire,
   stateFromRows,
-  stateToWire,
   witnessToWire,
-  type WireEnvelope,
-  type WireState,
+  type WireCllState,
+  type WireEntry,
   type WireWitness,
 } from "./serde.js";
 import {
-  LedgerError,
+  CllError,
+  validateIdentifier,
   type AppendInput,
+  type CllBackend,
   type CllState,
-  type EnvelopeInput,
   type WitnessState,
 } from "./types.js";
 
-type WireRecord = WireState["records"][number];
+interface SharedLock {
+  tail: Promise<void>;
+  references: number;
+}
 
-/** SQLite WAL backend with normalized, log-scoped rows. */
-export class SqliteStore extends MemoryStore {
-  private static readonly locks = new Map<
-    PropertyKey,
-    { tail: Promise<void>; references: number }
-  >();
-  private sqlQueue: Promise<void> = Promise.resolve();
+/** SQLite backend with WAL durability and log-scoped transactions. */
+export class SqliteStore implements CllBackend {
+  private static readonly locks = new Map<string, SharedLock>();
+  private readonly state = new BackendState();
+  private queue: Promise<void> = Promise.resolve();
+  private closed = false;
 
   private constructor(
     private readonly db: Database.Database,
     private readonly logId: string,
-    private readonly lockKey: PropertyKey,
-    private readonly sharedLock: { tail: Promise<void>; references: number },
-  ) {
-    super();
-  }
+    private readonly lockKey: string,
+    private readonly sharedLock: SharedLock,
+  ) {}
 
   public static open(path: string, logId = "default"): SqliteStore {
+    validateIdentifier(logId);
     const db = new Database(path);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
-    db.pragma("busy_timeout = 5000");
     db.exec(`
-      CREATE TABLE IF NOT EXISTS ledger_meta (
+      CREATE TABLE IF NOT EXISTS cll_meta (
         log_id TEXT PRIMARY KEY,
-        cll BLOB NOT NULL
+        state BLOB NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS ledger_records (
+      CREATE TABLE IF NOT EXISTS cll_entries (
         log_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
-        capsule_id TEXT NOT NULL,
-        record BLOB NOT NULL,
+        value BLOB NOT NULL,
+        appended_at TEXT NOT NULL,
         PRIMARY KEY(log_id, seq),
-        UNIQUE(log_id, capsule_id)
+        UNIQUE(log_id, value)
       );
-      CREATE TABLE IF NOT EXISTS ledger_envelopes (
-        log_id TEXT NOT NULL,
-        capsule_id TEXT NOT NULL,
-        digest TEXT NOT NULL,
-        envelope BLOB NOT NULL,
-        PRIMARY KEY(log_id, capsule_id, digest)
-      );
-      CREATE TABLE IF NOT EXISTS ledger_nodes (
+      CREATE TABLE IF NOT EXISTS cll_nodes (
         log_id TEXT NOT NULL,
         position INTEGER NOT NULL,
         node BLOB NOT NULL,
         PRIMARY KEY(log_id, position)
       );
-      CREATE TABLE IF NOT EXISTS ledger_witnesses (
+      CREATE TABLE IF NOT EXISTS cll_witnesses (
         log_id TEXT NOT NULL,
         witness_id TEXT NOT NULL,
         checkpoint_size TEXT NOT NULL,
@@ -78,90 +71,77 @@ export class SqliteStore extends MemoryStore {
         PRIMARY KEY(log_id, witness_id, checkpoint_size)
       );
     `);
-    const empty = stateToWire([], {
+    const empty = cllToWire({
       size: 0n,
       nodes: [],
       indexedSeq: 0n,
       witnesses: [],
-    }).cll;
-    db.prepare("INSERT OR IGNORE INTO ledger_meta(log_id,cll) VALUES(?,?)").run(
+    });
+    db.prepare("INSERT OR IGNORE INTO cll_meta(log_id,state) VALUES(?,?)").run(
       logId,
       JSON.stringify(empty),
     );
-    const lockKey: PropertyKey =
-      path === ":memory:" ? Symbol(":memory:") : realpathSync(path);
+    const lockKey = `${path}\0${logId}`;
     let sharedLock = SqliteStore.locks.get(lockKey);
     if (sharedLock === undefined) {
       sharedLock = { tail: Promise.resolve(), references: 0 };
       SqliteStore.locks.set(lockKey, sharedLock);
     }
     sharedLock.references += 1;
-    const store = new SqliteStore(db, logId, lockKey, sharedLock);
-    store.refreshSnapshot();
-    return store;
+    const backend = new SqliteStore(db, logId, lockKey, sharedLock);
+    backend.refreshSnapshot();
+    return backend;
+  }
+
+  private ensureOpen(): void {
+    if (this.closed) throw new CllError("closed", "backend is closed");
   }
 
   private refresh(): void {
     const meta = this.db
-      .prepare("SELECT cll FROM ledger_meta WHERE log_id=?")
-      .get(this.logId) as { cll: Buffer | string } | undefined;
-    const recordRows = this.db
+      .prepare("SELECT state FROM cll_meta WHERE log_id=?")
+      .get(this.logId) as { state: Buffer | string } | undefined;
+    const entries = this.db
       .prepare(
-        "SELECT record FROM ledger_records WHERE log_id=? ORDER BY seq ASC",
-      )
-      .all(this.logId) as Array<{ record: Buffer | string }>;
-    const envelopeRows = this.db
-      .prepare(
-        "SELECT capsule_id,envelope FROM ledger_envelopes WHERE log_id=? ORDER BY capsule_id,digest",
+        "SELECT seq,value,appended_at FROM cll_entries WHERE log_id=? ORDER BY seq",
       )
       .all(this.logId) as Array<{
-      capsule_id: string;
-      envelope: Buffer | string;
+      seq: number;
+      value: Buffer;
+      appended_at: string;
     }>;
-    const nodeRows = this.db
-      .prepare(
-        "SELECT node FROM ledger_nodes WHERE log_id=? ORDER BY position ASC",
-      )
+    const nodes = this.db
+      .prepare("SELECT node FROM cll_nodes WHERE log_id=? ORDER BY position")
       .all(this.logId) as Array<{ node: Buffer }>;
-    const witnessRows = this.db
+    const witnesses = this.db
       .prepare(
-        "SELECT witness FROM ledger_witnesses WHERE log_id=? ORDER BY checkpoint_size,witness_id",
+        "SELECT witness FROM cll_witnesses WHERE log_id=? ORDER BY checkpoint_size,witness_id",
       )
       .all(this.logId) as Array<{ witness: Buffer | string }>;
     try {
-      if (meta === undefined) throw new Error("missing ledger metadata row");
-      const state = stateFromRows({
-        records: recordRows.map(
-          (row) => JSON.parse(String(row.record)) as WireRecord,
-        ),
-        envelopes: envelopeRows.map((row) => ({
-          capsuleId: row.capsule_id,
-          envelope: JSON.parse(String(row.envelope)) as WireEnvelope,
+      if (meta === undefined) throw new Error("missing CLL metadata");
+      const decoded = stateFromRows({
+        cll: JSON.parse(String(meta.state)) as WireCllState,
+        entries: entries.map((row) => ({
+          seq: String(row.seq),
+          value: row.value.toString("base64"),
+          appendedAt: row.appended_at,
         })),
-        cll: JSON.parse(String(meta.cll)) as WireState["cll"],
-        nodes: nodeRows.map((row) => row.node),
-        witnesses: witnessRows.map(
+        nodes: nodes.map((row) => row.node),
+        witnesses: witnesses.map(
           (row) => JSON.parse(String(row.witness)) as WireWitness,
         ),
       });
-      this.replaceState(state.records, state.cll);
+      this.state.replace(decoded.entries, decoded.cll);
     } catch (error) {
-      if (error instanceof LedgerError && error.code === "corrupt") throw error;
-      throw new LedgerError(
-        "corrupt",
-        "stored SQLite ledger state is corrupt",
-        {
-          cause: error,
-        },
-      );
+      if (error instanceof CllError) throw error;
+      throw new CllError("corrupt", "stored SQLite CLL state is corrupt", {
+        cause: error,
+      });
     }
   }
 
   private refreshSnapshot(): void {
-    if (this.db.inTransaction) {
-      this.refresh();
-      return;
-    }
     this.db.exec("BEGIN");
     try {
       this.refresh();
@@ -173,22 +153,23 @@ export class SqliteStore extends MemoryStore {
   }
 
   private async transaction<T>(
-    operation: () => Promise<T>,
+    operation: () => T,
     persist: (result: T) => void,
   ): Promise<T> {
-    const prior = Promise.all([this.sqlQueue, this.sharedLock.tail]);
+    const prior = Promise.all([this.queue, this.sharedLock.tail]);
     let release!: () => void;
     const pending = new Promise<void>((resolve) => {
       release = resolve;
     });
-    this.sqlQueue = pending;
+    this.queue = pending;
     this.sharedLock.tail = pending;
     await prior;
     try {
+      this.ensureOpen();
       this.db.exec("BEGIN IMMEDIATE");
+      this.refresh();
       try {
-        this.refresh();
-        const result = await operation();
+        const result = operation();
         persist(result);
         this.db.exec("COMMIT");
         return result;
@@ -202,110 +183,76 @@ export class SqliteStore extends MemoryStore {
     }
   }
 
-  public override append(input: AppendInput) {
+  private persistCll(before: CllState): void {
+    const current = this.state.cll();
+    const metadata = cllToWire({ ...current, nodes: [], witnesses: [] });
+    this.db
+      .prepare("UPDATE cll_meta SET state=? WHERE log_id=?")
+      .run(JSON.stringify(metadata), this.logId);
+    const nodeInsert = this.db.prepare(
+      "INSERT INTO cll_nodes(log_id,position,node) VALUES(?,?,?)",
+    );
+    for (
+      let position = before.nodes.length;
+      position < current.nodes.length;
+      position += 1
+    )
+      nodeInsert.run(this.logId, position, current.nodes[position]!);
+    const witnessInsert = this.db.prepare(
+      "INSERT INTO cll_witnesses(log_id,witness_id,checkpoint_size,attempts,witness) VALUES(?,?,?,?,?)",
+    );
+    for (const witness of addedWitnesses(before.witnesses, current.witnesses))
+      witnessInsert.run(
+        this.logId,
+        witness.witnessId,
+        String(witness.checkpointSize),
+        witness.attempts,
+        JSON.stringify(witnessToWire(witness)),
+      );
+  }
+
+  public append(input: AppendInput) {
     return this.transaction(
-      () => super.append(input),
+      () => this.state.append(input),
       (result) => {
         if (result.outcome !== "inserted") return;
-        const wire = recordToWire({ ...result.record, envelopes: [] });
+        const wire: WireEntry = entryToWire(result.entry);
         this.db
           .prepare(
-            "INSERT INTO ledger_records(log_id,seq,capsule_id,record) VALUES(?,?,?,?)",
+            "INSERT INTO cll_entries(log_id,seq,value,appended_at) VALUES(?,?,?,?)",
           )
           .run(
             this.logId,
-            Number(result.record.seq),
-            result.record.capsuleId,
-            JSON.stringify(wire),
-          );
-        const statement = this.db.prepare(
-          "INSERT INTO ledger_envelopes(log_id,capsule_id,digest,envelope) VALUES(?,?,?,?)",
-        );
-        for (const envelope of result.record.envelopes)
-          statement.run(
-            this.logId,
-            result.record.capsuleId,
-            envelope.digest,
-            JSON.stringify(envelopeToWire(envelope)),
+            Number(result.entry.seq),
+            result.entry.value,
+            wire.appendedAt,
           );
       },
     );
   }
 
-  public override addEnvelope(input: EnvelopeInput) {
-    return this.transaction(
-      () => super.addEnvelope(input),
-      (result) => {
-        if (result.outcome !== "inserted") return;
-        this.db
-          .prepare(
-            "INSERT INTO ledger_envelopes(log_id,capsule_id,digest,envelope) VALUES(?,?,?,?)",
-          )
-          .run(
-            this.logId,
-            input.capsuleId,
-            result.envelope.digest,
-            JSON.stringify(envelopeToWire(result.envelope)),
-          );
-      },
-    );
-  }
-
-  public override commitCll(
+  public commitCll(
     expectedSize: bigint,
     expectedCheckpoint: Uint8Array | undefined,
     next: CllState,
   ) {
-    let beforeWitnesses: readonly WitnessState[] = [];
+    let before!: CllState;
     return this.transaction(
       () => {
-        beforeWitnesses = this.cll.witnesses;
-        return super.commitCll(expectedSize, expectedCheckpoint, next);
+        before = cloneCll(this.state.cll());
+        this.state.commitCll(expectedSize, expectedCheckpoint, next);
       },
-      () => {
-        const committed = this.cll;
-        const wire = stateToWire([], {
-          ...committed,
-          nodes: [],
-          witnesses: [],
-        }).cll;
-        this.db
-          .prepare("UPDATE ledger_meta SET cll=? WHERE log_id=?")
-          .run(JSON.stringify(wire), this.logId);
-        const nodeInsert = this.db.prepare(
-          "INSERT INTO ledger_nodes(log_id,position,node) VALUES(?,?,?)",
-        );
-        for (
-          let position = Number(expectedSize);
-          position < committed.nodes.length;
-          position += 1
-        )
-          nodeInsert.run(this.logId, position, committed.nodes[position]!);
-        const witnessInsert = this.db.prepare(
-          "INSERT INTO ledger_witnesses(log_id,witness_id,checkpoint_size,attempts,witness) VALUES(?,?,?,?,?)",
-        );
-        for (const witness of this.witnessDelta(
-          beforeWitnesses,
-          committed.witnesses,
-        ))
-          witnessInsert.run(
-            this.logId,
-            witness.witnessId,
-            String(witness.checkpointSize),
-            witness.attempts,
-            JSON.stringify(witnessToWire(witness)),
-          );
-      },
+      () => this.persistCll(before),
     );
   }
 
-  public override commitWitness(expectedAttempts: number, next: WitnessState) {
+  public commitWitness(expectedAttempts: number, next: WitnessState) {
     return this.transaction(
-      () => super.commitWitness(expectedAttempts, next),
+      () => this.state.commitWitness(expectedAttempts, next),
       () => {
         const result = this.db
           .prepare(
-            "UPDATE ledger_witnesses SET attempts=?,witness=? WHERE log_id=? AND witness_id=? AND checkpoint_size=? AND attempts=?",
+            "UPDATE cll_witnesses SET attempts=?,witness=? WHERE log_id=? AND witness_id=? AND checkpoint_size=? AND attempts=?",
           )
           .run(
             next.attempts,
@@ -315,46 +262,42 @@ export class SqliteStore extends MemoryStore {
             String(next.checkpointSize),
             expectedAttempts,
           );
-        if (result.changes !== 1) throw new Error("witness CAS failed");
+        if (result.changes !== 1)
+          throw new CllError("contention", "witness CAS failed");
       },
     );
   }
 
-  private async refreshForRead(): Promise<void> {
-    await Promise.all([this.sqlQueue, this.sharedLock.tail]);
+  private async read<T>(operation: () => T): Promise<T> {
+    await Promise.all([this.queue, this.sharedLock.tail]);
+    this.ensureOpen();
     this.refreshSnapshot();
+    return operation();
   }
-  public override async get(id: string) {
-    await this.refreshForRead();
-    return super.get(id);
+
+  public getEntry(value: Uint8Array) {
+    return this.read(() => this.state.getEntry(value));
   }
-  public override async scan(after: bigint, limit: number) {
-    await this.refreshForRead();
-    return super.scan(after, limit);
+  public scanEntries(afterSeq: bigint, limit: number) {
+    return this.read(() => this.state.scanEntries(afterSeq, limit));
   }
-  public override async loadCll() {
-    await this.refreshForRead();
-    return super.loadCll();
+  public loadCll() {
+    return this.read(() => this.state.cll());
   }
-  public override async findChainGaps() {
-    await this.refreshForRead();
-    return super.findChainGaps();
+  public pendingWitnesses(now: Date, limit: number) {
+    return this.read(() => this.state.pendingWitnesses(now, limit));
   }
-  public override async pendingWitnesses(now: Date, limit: number) {
-    await this.refreshForRead();
-    return super.pendingWitnesses(now, limit);
+  public getWitness(witnessId: string, checkpointSize: bigint) {
+    return this.read(() => this.state.getWitness(witnessId, checkpointSize));
   }
-  public override async getWitness(witnessId: string, checkpointSize: bigint) {
-    await this.refreshForRead();
-    return super.getWitness(witnessId, checkpointSize);
-  }
-  public override async close(): Promise<void> {
+
+  public async close(): Promise<void> {
     if (this.closed) return;
-    await Promise.all([this.sqlQueue, this.sharedLock.tail]);
+    await Promise.all([this.queue, this.sharedLock.tail]);
+    this.closed = true;
     this.db.close();
     this.sharedLock.references -= 1;
     if (this.sharedLock.references === 0)
       SqliteStore.locks.delete(this.lockKey);
-    await super.close();
   }
 }

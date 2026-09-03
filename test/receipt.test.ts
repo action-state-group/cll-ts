@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { decode, encode, rfc8949EncodeOptions } from "cborg";
 import { describe, expect, it } from "vitest";
-import { ReceiptVerifier, type AnchorReceipt } from "../src/index.js";
+import { ReceiptVerifier, type WitnessReceipt } from "../src/index.js";
 
 const fixture = resolve("test/fixtures/capsule-anchor-leg1");
 const checkpoint = readFileSync(resolve(fixture, "checkpoint.cose"));
@@ -11,7 +11,7 @@ const authorityKey = Buffer.from(
   "39bb654c9dc0afe1c0edef0deffaa69099b8518836c9ba26e0491535840f96b5",
   "hex",
 );
-const receipt: AnchorReceipt = {
+const receipt: Required<WitnessReceipt> = {
   bytes: receiptBytes,
   entryHash: "b16766df5e64792852c1da1210a448e6abf0eb9eef9d2a45b4172aafcb1eb2bb",
   entryHashScheme: "legacy",

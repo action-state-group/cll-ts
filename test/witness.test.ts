@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CapsuleAnchorClient, LedgerError, limits } from "../src/index.js";
+import { HttpWitnessClient, CllError, limits } from "../src/index.js";
 
 const client = () =>
-  new CapsuleAnchorClient("anchor", new URL("https://anchor.example"), 1_000);
+  new HttpWitnessClient("anchor", new URL("https://anchor.example"), 1_000);
 const response = (
   body: string | ReadableStream<Uint8Array>,
   status = 200,
@@ -28,9 +28,9 @@ describe("capsule-anchor HTTP client", () => {
       vi.fn(async () => response(body)),
     );
     await expect(client().submit(Uint8Array.of(1))).rejects.toMatchObject({
-      code: "admission_rejected",
+      code: "rejected",
       message: "witness response too large",
-    } satisfies Partial<LedgerError>);
+    } satisfies Partial<CllError>);
   });
 
   it.each([408, 429, 500, 503])(
@@ -42,7 +42,7 @@ describe("capsule-anchor HTTP client", () => {
       );
       await expect(client().submit(Uint8Array.of(1))).rejects.toMatchObject({
         code: "contention",
-      } satisfies Partial<LedgerError>);
+      } satisfies Partial<CllError>);
     },
   );
 
@@ -52,8 +52,8 @@ describe("capsule-anchor HTTP client", () => {
       vi.fn(async () => response("failure", 400)),
     );
     await expect(client().submit(Uint8Array.of(1))).rejects.toMatchObject({
-      code: "admission_rejected",
-    } satisfies Partial<LedgerError>);
+      code: "rejected",
+    } satisfies Partial<CllError>);
   });
 
   it("does not follow witness redirects", async () => {
@@ -63,8 +63,8 @@ describe("capsule-anchor HTTP client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     await expect(client().submit(Uint8Array.of(1))).rejects.toMatchObject({
-      code: "admission_rejected",
-    } satisfies Partial<LedgerError>);
+      code: "rejected",
+    } satisfies Partial<CllError>);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
   });
@@ -75,7 +75,7 @@ describe("capsule-anchor HTTP client", () => {
     "https://anchor.example?query=1",
     "https://anchor.example#fragment",
   ])("rejects an unsafe base URL %s", (url) => {
-    expect(() => new CapsuleAnchorClient("anchor", new URL(url))).toThrow(
+    expect(() => new HttpWitnessClient("anchor", new URL(url))).toThrow(
       "witness base URL",
     );
   });
@@ -108,8 +108,8 @@ describe("capsule-anchor HTTP client", () => {
       vi.fn(async () => response(body)),
     );
     await expect(client().submit(Uint8Array.of(1))).rejects.toMatchObject({
-      code: "admission_rejected",
+      code: "rejected",
       message,
-    } satisfies Partial<LedgerError>);
+    } satisfies Partial<CllError>);
   });
 });

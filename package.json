@@ -1,22 +1,46 @@
 {
-  "name": "cll-ts",
+  "name": "@action-state-group/cll",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "description": "TypeScript Checkpointed Local Log with generic entries, MMR proofs, signed checkpoints, durable stores, and an AAC ledger binding",
+  "description": "Generic TypeScript Checkpointed Local Log with MMR proofs, checkpoints, witnesses, and durable backends",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/action-state-group/cll-ts.git"
+  },
+  "homepage": "https://github.com/action-state-group/cll-ts#readme",
+  "bugs": {
+    "url": "https://github.com/action-state-group/cll-ts/issues"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./jsonl": {
+      "types": "./dist/jsonl.d.ts",
+      "import": "./dist/jsonl.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "import": "./dist/sqlite.js"
+    },
+    "./mysql": {
+      "types": "./dist/mysql.d.ts",
+      "import": "./dist/mysql.js"
     }
   },
   "files": [
     "dist",
     "README.md",
+    "DESIGN.md",
     "LICENSE"
   ],
   "engines": {
     "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsup && tsc -p tsconfig.build.json",
@@ -30,7 +54,6 @@
   "dependencies": {
     "better-sqlite3": "13.0.3",
     "cborg": "6.1.2",
-    "capsule-emit-ts": "file:../capsule-emit-ts",
     "fs-ext": "2.1.1",
     "mysql2": "3.24.3"
   },

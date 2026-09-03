@@ -1,9 +1,9 @@
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { decode, encode, rfc8949EncodeOptions } from "cborg";
-import { jcs } from "capsule-emit-ts/aac";
+import { canonicalJson } from "./canonical-json.js";
 import { checkpointProjection, verifyCheckpoint } from "./checkpoint.js";
 import { limits } from "./types.js";
-import type { AnchorReceipt } from "./witness.js";
+import type { WitnessReceipt } from "./witness.js";
 
 const encodeCanonical = (value: unknown): Uint8Array =>
   encode(value, rfc8949EncodeOptions);
@@ -95,7 +95,7 @@ function checkpointEntry(checkpoint: Uint8Array): Uint8Array | undefined {
     keyId: Buffer.from(headers.get(4) as Uint8Array).toString("hex"),
     timestamp: claims.get("issued_at") as string,
   });
-  return sha(sha(jcs(projection)));
+  return sha(sha(canonicalJson(projection)));
 }
 
 /** Offline RFC 9162 receipt verifier under a pinned Ed25519 authority key. */
@@ -107,13 +107,16 @@ export class ReceiptVerifier {
     this.publicKey = Uint8Array.from(publicKey);
   }
 
-  public verify(checkpoint: Uint8Array, receipt: AnchorReceipt): boolean {
+  public verify(checkpoint: Uint8Array, receipt: WitnessReceipt): boolean {
     try {
       if (
         receipt.bytes.length === 0 ||
         receipt.bytes.length > limits.receipt ||
         receipt.entryHashScheme !== "legacy" ||
+        typeof receipt.entryHash !== "string" ||
         !/^[0-9a-f]{64}$/u.test(receipt.entryHash) ||
+        !Number.isSafeInteger(receipt.treeSize) ||
+        !Number.isSafeInteger(receipt.leafIndex) ||
         receipt.bytes[0] !== 0xd2
       )
         return false;
@@ -161,14 +164,14 @@ export class ReceiptVerifier {
         proof[2].some(
           (hash) => !(hash instanceof Uint8Array) || hash.length !== 32,
         ) ||
-        proof[0] !== receipt.treeSize ||
-        proof[1] !== receipt.leafIndex
+        proof[0] !== receipt.treeSize! ||
+        proof[1] !== receipt.leafIndex!
       )
         return false;
       const root = proofRoot(
         entry,
-        receipt.leafIndex,
-        receipt.treeSize,
+        receipt.leafIndex!,
+        receipt.treeSize!,
         proof[2] as Uint8Array[],
       );
       if (root === undefined) return false;

@@ -1,19 +1,24 @@
 import {
   createHash,
+  createPrivateKey,
   createPublicKey,
   sign as edSign,
   verify as edVerify,
 } from "node:crypto";
 import { decode, encode, rfc8949EncodeOptions } from "cborg";
-import { jcs } from "capsule-emit-ts/aac";
-import type { SigningIdentity } from "capsule-emit-ts";
+import { canonicalJson } from "./canonical-json.js";
 import {
   commitmentObject,
   leafCount,
   rootFromPeaks,
   verifyConsistency,
 } from "./mmr.js";
-import { LedgerError, limits, validateIdentifier } from "./types.js";
+import {
+  CllError,
+  limits,
+  validateIdentifier,
+  type CheckpointSigningIdentity,
+} from "./types.js";
 
 export const CHECKPOINT_CONTENT_TYPE = "application/cll-checkpoint+cbor";
 export interface ConsistencyProof {
@@ -30,7 +35,7 @@ export interface CheckpointInput {
   readonly previousSize: bigint;
   readonly previousPeaks: readonly Uint8Array[];
   readonly timestamp: Date | string;
-  readonly identity: SigningIdentity;
+  readonly identity: CheckpointSigningIdentity;
   readonly consistencyProof?: ConsistencyProof;
   readonly cadence?: number;
 }
@@ -56,6 +61,31 @@ export interface CheckpointProjectionInput {
   readonly timestamp: string;
 }
 
+const ed25519Pkcs8Prefix = Buffer.from(
+  "302e020100300506032b657004220420",
+  "hex",
+);
+
+/** Create an Ed25519 checkpoint signer from a 32-byte seed. */
+export function createCheckpointIdentity(
+  seed: Uint8Array,
+): CheckpointSigningIdentity {
+  if (seed.length !== 32) throw new TypeError("Ed25519 seed must be 32 bytes");
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([ed25519Pkcs8Prefix, seed]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const der = createPublicKey(privateKey).export({
+    format: "der",
+    type: "spki",
+  });
+  return Object.freeze({
+    privateKey,
+    publicKey: Uint8Array.from(der.subarray(der.length - 32)),
+  });
+}
+
 const encodeCanonical = (value: unknown): Uint8Array =>
   encode(value, rfc8949EncodeOptions);
 const taggedSign1 = (items: unknown[]): Uint8Array =>
@@ -63,7 +93,7 @@ const taggedSign1 = (items: unknown[]): Uint8Array =>
 const formatTime = (value: Date | string): string => {
   if (value instanceof Date) {
     if (Number.isNaN(value.valueOf()))
-      throw new LedgerError("invalid", "invalid checkpoint timestamp");
+      throw new CllError("invalid", "invalid checkpoint timestamp");
     return value
       .toISOString()
       .replace(/\.000Z$/u, "Z")
@@ -74,11 +104,11 @@ const formatTime = (value: Date | string): string => {
       value,
     );
   if (match === null)
-    throw new LedgerError("invalid", "invalid checkpoint timestamp");
+    throw new CllError("invalid", "invalid checkpoint timestamp");
   const fraction = (match[2] ?? "").padEnd(9, "0");
   const parsed = new Date(`${match[1]}.${fraction.slice(0, 3)}${match[3]}`);
   if (Number.isNaN(parsed.valueOf()))
-    throw new LedgerError("invalid", "invalid checkpoint timestamp");
+    throw new CllError("invalid", "invalid checkpoint timestamp");
   const trimmed = fraction.replace(/0+$/u, "");
   return `${parsed.toISOString().slice(0, 19)}${trimmed === "" ? "" : `.${trimmed}`}Z`;
 };
@@ -86,7 +116,7 @@ const commitment = (peaks: readonly Uint8Array[]): Uint8Array => {
   try {
     return commitmentObject(peaks);
   } catch {
-    throw new LedgerError("invalid", "checkpoint peak must be 32 bytes");
+    throw new CllError("invalid", "checkpoint peak must be 32 bytes");
   }
 };
 const proofWire = (proof: ConsistencyProof) => ({
@@ -124,11 +154,11 @@ export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
     input.previousSize < 0n ||
     input.previousSize >= input.mmrSize
   )
-    throw new LedgerError("invalid", "invalid checkpoint sizes");
+    throw new CllError("invalid", "invalid checkpoint sizes");
   if (input.identity.publicKey.length !== 32)
-    throw new LedgerError("invalid", "invalid checkpoint identity");
+    throw new CllError("invalid", "invalid checkpoint identity");
   if (input.previousSize === 0n && input.consistencyProof !== undefined)
-    throw new LedgerError(
+    throw new CllError(
       "invalid",
       "first checkpoint must not carry consistency proof",
     );
@@ -138,7 +168,7 @@ export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
       input.consistencyProof.sizeA !== input.previousSize ||
       input.consistencyProof.sizeB !== input.mmrSize)
   )
-    throw new LedgerError(
+    throw new CllError(
       "invalid",
       "non-first checkpoint requires matching consistency proof",
     );
@@ -157,7 +187,7 @@ export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
     keyId,
     timestamp,
   });
-  const json = jcs(projection);
+  const json = canonicalJson(projection);
   const digest = createHash("sha256").update(json).digest("hex");
   const claims: Record<string, unknown> = {
     kind: "cll-checkpoint",
@@ -197,7 +227,7 @@ export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
   const signature = edSign(null, sigStructure, input.identity.privateKey);
   const cose = taggedSign1([protectedBytes, new Map(), payload, signature]);
   if (cose.length > limits.checkpointPayload)
-    throw new LedgerError("invalid", "signed checkpoint is too large");
+    throw new CllError("invalid", "signed checkpoint is too large");
   return {
     json,
     cose,

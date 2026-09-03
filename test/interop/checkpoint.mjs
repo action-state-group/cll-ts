@@ -1,6 +1,10 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { createEd25519Identity } from "capsule-emit-ts";
-import { MmrTree, signCheckpoint, verifyCheckpoint } from "../../dist/index.js";
+import {
+  createCheckpointIdentity,
+  MmrTree,
+  signCheckpoint,
+  verifyCheckpoint,
+} from "../../dist/index.js";
 
 const [mode, path] = process.argv.slice(2);
 if ((mode !== "write" && mode !== "verify") || path === undefined) {
@@ -9,7 +13,7 @@ if ((mode !== "write" && mode !== "verify") || path === undefined) {
 
 if (mode === "write") {
   const seed = Uint8Array.from({ length: 32 }, (_, index) => index);
-  const identity = createEd25519Identity(seed);
+  const identity = createCheckpointIdentity(seed);
   const tree = new MmrTree();
   tree.append(Uint8Array.from({ length: 32 }, () => 0x11));
   const checkpoint = signCheckpoint({

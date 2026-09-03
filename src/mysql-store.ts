@@ -3,39 +3,35 @@ import mysql, {
   type PoolConnection,
   type PoolOptions,
 } from "mysql2/promise";
-import { cloneCll, cloneRecord } from "./clone.js";
-import { MemoryStore } from "./memory-store.js";
+import { addedWitnesses, BackendState } from "./backend-state.js";
+import { cloneCll } from "./clone.js";
 import {
-  envelopeToWire,
-  recordToWire,
+  cllToWire,
+  entryToWire,
   stateFromRows,
-  stateToWire,
   witnessToWire,
-  type WireEnvelope,
-  type WireState,
+  type WireCllState,
   type WireWitness,
 } from "./serde.js";
 import {
-  LedgerError,
+  CllError,
   validateIdentifier,
   type AppendInput,
+  type CllBackend,
   type CllState,
-  type EnvelopeInput,
   type WitnessState,
 } from "./types.js";
 
-type WireRecord = WireState["records"][number];
-
-/** MySQL 8 backend with normalized rows and one log-scoped transaction lock. */
-export class MysqlStore extends MemoryStore {
-  private operationQueue: Promise<void> = Promise.resolve();
+/** MySQL 8 backend with one log-scoped metadata row lock per transaction. */
+export class MysqlStore implements CllBackend {
+  private readonly state = new BackendState();
+  private queue: Promise<void> = Promise.resolve();
+  private closed = false;
 
   private constructor(
     private readonly pool: Pool,
     private readonly logId: string,
-  ) {
-    super();
-  }
+  ) {}
 
   public static async open(
     options: PoolOptions | string,
@@ -47,32 +43,23 @@ export class MysqlStore extends MemoryStore {
         ? mysql.createPool(options)
         : mysql.createPool(options);
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS capsule_ledger_meta (
+      CREATE TABLE IF NOT EXISTS cll_meta (
         log_id VARCHAR(191) PRIMARY KEY,
-        cll LONGBLOB NOT NULL
+        state LONGBLOB NOT NULL
       ) ENGINE=InnoDB
     `);
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS capsule_ledger_records (
+      CREATE TABLE IF NOT EXISTS cll_entries (
         log_id VARCHAR(191) NOT NULL,
         seq BIGINT UNSIGNED NOT NULL,
-        capsule_id CHAR(64) NOT NULL,
-        record LONGBLOB NOT NULL,
+        value BINARY(32) NOT NULL,
+        appended_at VARCHAR(32) NOT NULL,
         PRIMARY KEY(log_id, seq),
-        UNIQUE KEY uq_capsule(log_id, capsule_id)
+        UNIQUE KEY uq_cll_entry(log_id, value)
       ) ENGINE=InnoDB
     `);
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS capsule_ledger_envelopes (
-        log_id VARCHAR(191) NOT NULL,
-        capsule_id CHAR(64) NOT NULL,
-        digest CHAR(64) NOT NULL,
-        envelope LONGBLOB NOT NULL,
-        PRIMARY KEY(log_id, capsule_id, digest)
-      ) ENGINE=InnoDB
-    `);
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS capsule_ledger_nodes (
+      CREATE TABLE IF NOT EXISTS cll_nodes (
         log_id VARCHAR(191) NOT NULL,
         position BIGINT UNSIGNED NOT NULL,
         node BINARY(32) NOT NULL,
@@ -80,7 +67,7 @@ export class MysqlStore extends MemoryStore {
       ) ENGINE=InnoDB
     `);
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS capsule_ledger_witnesses (
+      CREATE TABLE IF NOT EXISTS cll_witnesses (
         log_id VARCHAR(191) NOT NULL,
         witness_id VARCHAR(191) NOT NULL,
         checkpoint_size VARCHAR(32) NOT NULL,
@@ -89,84 +76,87 @@ export class MysqlStore extends MemoryStore {
         PRIMARY KEY(log_id, witness_id, checkpoint_size)
       ) ENGINE=InnoDB
     `);
-    const empty = stateToWire([], {
+    const empty = cllToWire({
       size: 0n,
       nodes: [],
       indexedSeq: 0n,
       witnesses: [],
-    }).cll;
+    });
     await pool.execute(
-      "INSERT IGNORE INTO capsule_ledger_meta(log_id,cll) VALUES(?,?)",
+      "INSERT IGNORE INTO cll_meta(log_id,state) VALUES(?,?)",
       [logId, JSON.stringify(empty)],
     );
-    const store = new MysqlStore(pool, logId);
-    await store.serialized(() => store.refreshReadTransaction());
-    return store;
+    const backend = new MysqlStore(pool, logId);
+    await backend.serialized(() => backend.refreshReadTransaction());
+    return backend;
+  }
+
+  private ensureOpen(): void {
+    if (this.closed) throw new CllError("closed", "backend is closed");
   }
 
   private async refresh(
-    connection: Pool | PoolConnection = this.pool,
+    connection: Pool | PoolConnection,
     forUpdate = false,
   ): Promise<void> {
     const [metaRows] = await connection.execute(
-      `SELECT cll FROM capsule_ledger_meta WHERE log_id=?${forUpdate ? " FOR UPDATE" : ""}`,
+      `SELECT state FROM cll_meta WHERE log_id=?${forUpdate ? " FOR UPDATE" : ""}`,
       [this.logId],
     );
-    const [recordRows] = await connection.execute(
-      "SELECT record FROM capsule_ledger_records WHERE log_id=? ORDER BY seq ASC",
-      [this.logId],
-    );
-    const [envelopeRows] = await connection.execute(
-      "SELECT capsule_id,envelope FROM capsule_ledger_envelopes WHERE log_id=? ORDER BY capsule_id,digest",
+    const [entryRows] = await connection.execute(
+      "SELECT seq,value,appended_at FROM cll_entries WHERE log_id=? ORDER BY seq",
       [this.logId],
     );
     const [nodeRows] = await connection.execute(
-      "SELECT node FROM capsule_ledger_nodes WHERE log_id=? ORDER BY position ASC",
+      "SELECT node FROM cll_nodes WHERE log_id=? ORDER BY position",
       [this.logId],
     );
     const [witnessRows] = await connection.execute(
-      "SELECT witness FROM capsule_ledger_witnesses WHERE log_id=? ORDER BY checkpoint_size,witness_id",
+      "SELECT witness FROM cll_witnesses WHERE log_id=? ORDER BY checkpoint_size,witness_id",
       [this.logId],
     );
     try {
-      const meta = (metaRows as Array<{ cll: Buffer | string }>)[0];
-      if (meta === undefined) throw new Error("missing ledger metadata row");
-      const state = stateFromRows({
-        records: (recordRows as Array<{ record: Buffer | string }>).map(
-          (row) => JSON.parse(String(row.record)) as WireRecord,
-        ),
-        envelopes: (
-          envelopeRows as Array<{
-            capsule_id: string;
-            envelope: Buffer | string;
+      const meta = (metaRows as Array<{ state: Buffer | string }>)[0];
+      if (meta === undefined) throw new Error("missing CLL metadata");
+      const nodes = (nodeRows as Array<{ node: Buffer }>).map(
+        (row) => row.node,
+      );
+      const decoded = stateFromRows({
+        cll: JSON.parse(String(meta.state)) as WireCllState,
+        entries: (
+          entryRows as Array<{
+            seq: string | number;
+            value: Buffer;
+            appended_at: string;
           }>
         ).map((row) => ({
-          capsuleId: row.capsule_id,
-          envelope: JSON.parse(String(row.envelope)) as WireEnvelope,
+          seq: String(row.seq),
+          value: row.value.toString("base64"),
+          appendedAt: row.appended_at,
         })),
-        cll: JSON.parse(String(meta.cll)) as WireState["cll"],
-        nodes: (nodeRows as Array<{ node: Buffer }>).map((row) => row.node),
+        nodes,
         witnesses: (witnessRows as Array<{ witness: Buffer | string }>).map(
           (row) => JSON.parse(String(row.witness)) as WireWitness,
         ),
       });
-      this.replaceState(state.records, state.cll);
+      this.state.replace(decoded.entries, decoded.cll);
     } catch (error) {
-      if (error instanceof LedgerError && error.code === "corrupt") throw error;
-      throw new LedgerError("corrupt", "stored MySQL ledger state is corrupt", {
+      if (error instanceof CllError) throw error;
+      throw new CllError("corrupt", "stored MySQL CLL state is corrupt", {
         cause: error,
       });
     }
   }
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
-    const prior = this.operationQueue;
+    const prior = this.queue;
     let release!: () => void;
-    this.operationQueue = new Promise<void>((resolve) => {
+    this.queue = new Promise<void>((resolve) => {
       release = resolve;
     });
     await prior;
     try {
+      this.ensureOpen();
       return await operation();
     } finally {
       release();
@@ -181,17 +171,7 @@ export class MysqlStore extends MemoryStore {
       await this.refresh(connection);
       await connection.commit();
     } catch (error) {
-      let rollbackError: unknown;
-      try {
-        await connection.rollback();
-      } catch (failure) {
-        rollbackError = failure;
-      }
-      if (rollbackError !== undefined)
-        throw new AggregateError(
-          [error, rollbackError],
-          "MySQL read transaction and rollback both failed",
-        );
+      await connection.rollback();
       throw error;
     } finally {
       connection.release();
@@ -199,153 +179,102 @@ export class MysqlStore extends MemoryStore {
   }
 
   private async transaction<T>(
-    operation: () => Promise<T>,
+    operation: () => T,
     persist: (connection: PoolConnection, result: T) => Promise<void>,
   ): Promise<T> {
-    return this.serialized(() => this.transactionLocked(operation, persist));
-  }
-
-  private async transactionLocked<T>(
-    operation: () => Promise<T>,
-    persist: (connection: PoolConnection, result: T) => Promise<void>,
-  ): Promise<T> {
-    const connection = await this.pool.getConnection();
-    let beforeRecords: ReturnType<typeof cloneRecord>[] | undefined;
-    let beforeCll: CllState | undefined;
-    try {
-      await connection.beginTransaction();
-      await this.refresh(connection, true);
-      beforeRecords = this.records.map(cloneRecord);
-      beforeCll = cloneCll(this.cll);
-      const result = await operation();
-      await persist(connection, result);
-      await connection.commit();
-      return result;
-    } catch (error) {
-      let rollbackError: unknown;
+    return this.serialized(async () => {
+      const connection = await this.pool.getConnection();
+      let entries: ReturnType<BackendState["entries"]> | undefined;
+      let cll: CllState | undefined;
       try {
+        await connection.beginTransaction();
+        await this.refresh(connection, true);
+        entries = this.state.entries();
+        cll = this.state.cll();
+        const result = operation();
+        await persist(connection, result);
+        await connection.commit();
+        return result;
+      } catch (error) {
         await connection.rollback();
-      } catch (failure) {
-        rollbackError = failure;
+        if (entries !== undefined && cll !== undefined)
+          this.state.replace(entries, cll);
+        throw error;
+      } finally {
+        connection.release();
       }
-      if (beforeRecords !== undefined && beforeCll !== undefined)
-        this.replaceState(beforeRecords, beforeCll);
-      if (rollbackError !== undefined)
-        throw new AggregateError(
-          [error, rollbackError],
-          "MySQL transaction and rollback both failed",
-        );
-      throw error;
-    } finally {
-      connection.release();
-    }
+    });
   }
 
-  public override append(input: AppendInput) {
-    return this.transaction(
-      () => super.append(input),
-      async (connection, result) => {
-        if (result.outcome !== "inserted") return;
-        await connection.execute(
-          "INSERT INTO capsule_ledger_records(log_id,seq,capsule_id,record) VALUES(?,?,?,?)",
-          [
-            this.logId,
-            String(result.record.seq),
-            result.record.capsuleId,
-            JSON.stringify(recordToWire({ ...result.record, envelopes: [] })),
-          ],
-        );
-        for (const envelope of result.record.envelopes)
-          await connection.execute(
-            "INSERT INTO capsule_ledger_envelopes(log_id,capsule_id,digest,envelope) VALUES(?,?,?,?)",
-            [
-              this.logId,
-              result.record.capsuleId,
-              envelope.digest,
-              JSON.stringify(envelopeToWire(envelope)),
-            ],
-          );
-      },
-    );
+  private async persistCll(connection: PoolConnection, before: CllState) {
+    const current = this.state.cll();
+    const metadata = cllToWire({ ...current, nodes: [], witnesses: [] });
+    await connection.execute("UPDATE cll_meta SET state=? WHERE log_id=?", [
+      JSON.stringify(metadata),
+      this.logId,
+    ]);
+    for (
+      let position = before.nodes.length;
+      position < current.nodes.length;
+      position += 1
+    )
+      await connection.execute(
+        "INSERT INTO cll_nodes(log_id,position,node) VALUES(?,?,?)",
+        [this.logId, String(position), Buffer.from(current.nodes[position]!)],
+      );
+    for (const witness of addedWitnesses(before.witnesses, current.witnesses))
+      await connection.execute(
+        "INSERT INTO cll_witnesses(log_id,witness_id,checkpoint_size,attempts,witness) VALUES(?,?,?,?,?)",
+        [
+          this.logId,
+          witness.witnessId,
+          String(witness.checkpointSize),
+          witness.attempts,
+          JSON.stringify(witnessToWire(witness)),
+        ],
+      );
   }
 
-  public override addEnvelope(input: EnvelopeInput) {
+  public append(input: AppendInput) {
     return this.transaction(
-      () => super.addEnvelope(input),
+      () => this.state.append(input),
       async (connection, result) => {
         if (result.outcome !== "inserted") return;
+        const wire = entryToWire(result.entry);
         await connection.execute(
-          "INSERT INTO capsule_ledger_envelopes(log_id,capsule_id,digest,envelope) VALUES(?,?,?,?)",
+          "INSERT INTO cll_entries(log_id,seq,value,appended_at) VALUES(?,?,?,?)",
           [
             this.logId,
-            input.capsuleId,
-            result.envelope.digest,
-            JSON.stringify(envelopeToWire(result.envelope)),
+            String(result.entry.seq),
+            Buffer.from(result.entry.value),
+            wire.appendedAt,
           ],
         );
       },
     );
   }
 
-  public override commitCll(
+  public commitCll(
     expectedSize: bigint,
     expectedCheckpoint: Uint8Array | undefined,
     next: CllState,
   ) {
-    let beforeWitnesses: readonly WitnessState[] = [];
+    let before!: CllState;
     return this.transaction(
       () => {
-        beforeWitnesses = this.cll.witnesses;
-        return super.commitCll(expectedSize, expectedCheckpoint, next);
+        before = cloneCll(this.state.cll());
+        this.state.commitCll(expectedSize, expectedCheckpoint, next);
       },
-      async (connection) => {
-        const committed = this.cll;
-        const wire = stateToWire([], {
-          ...committed,
-          nodes: [],
-          witnesses: [],
-        }).cll;
-        await connection.execute(
-          "UPDATE capsule_ledger_meta SET cll=? WHERE log_id=?",
-          [JSON.stringify(wire), this.logId],
-        );
-        for (
-          let position = Number(expectedSize);
-          position < committed.nodes.length;
-          position += 1
-        )
-          await connection.execute(
-            "INSERT INTO capsule_ledger_nodes(log_id,position,node) VALUES(?,?,?)",
-            [
-              this.logId,
-              String(position),
-              Buffer.from(committed.nodes[position]!),
-            ],
-          );
-        for (const witness of this.witnessDelta(
-          beforeWitnesses,
-          committed.witnesses,
-        ))
-          await connection.execute(
-            "INSERT INTO capsule_ledger_witnesses(log_id,witness_id,checkpoint_size,attempts,witness) VALUES(?,?,?,?,?)",
-            [
-              this.logId,
-              witness.witnessId,
-              String(witness.checkpointSize),
-              witness.attempts,
-              JSON.stringify(witnessToWire(witness)),
-            ],
-          );
-      },
+      (connection) => this.persistCll(connection, before),
     );
   }
 
-  public override commitWitness(expectedAttempts: number, next: WitnessState) {
+  public commitWitness(expectedAttempts: number, next: WitnessState) {
     return this.transaction(
-      () => super.commitWitness(expectedAttempts, next),
+      () => this.state.commitWitness(expectedAttempts, next),
       async (connection) => {
         const [result] = await connection.execute(
-          "UPDATE capsule_ledger_witnesses SET attempts=?,witness=? WHERE log_id=? AND witness_id=? AND checkpoint_size=? AND attempts=?",
+          "UPDATE cll_witnesses SET attempts=?,witness=? WHERE log_id=? AND witness_id=? AND checkpoint_size=? AND attempts=?",
           [
             next.attempts,
             JSON.stringify(witnessToWire(next)),
@@ -356,39 +285,38 @@ export class MysqlStore extends MemoryStore {
           ],
         );
         if ((result as { affectedRows: number }).affectedRows !== 1)
-          throw new Error("witness CAS failed");
+          throw new CllError("contention", "witness CAS failed");
       },
     );
   }
 
-  public override async get(id: string) {
-    return this.readSnapshot(() => super.get(id));
-  }
-  public override async scan(after: bigint, limit: number) {
-    return this.readSnapshot(() => super.scan(after, limit));
-  }
-  public override async loadCll() {
-    return this.readSnapshot(() => super.loadCll());
-  }
-  public override async findChainGaps() {
-    return this.readSnapshot(() => super.findChainGaps());
-  }
-  public override async pendingWitnesses(now: Date, limit: number) {
-    return this.readSnapshot(() => super.pendingWitnesses(now, limit));
-  }
-  public override async getWitness(witnessId: string, checkpointSize: bigint) {
-    return this.readSnapshot(() => super.getWitness(witnessId, checkpointSize));
-  }
-  private async readSnapshot<T>(operation: () => Promise<T>): Promise<T> {
+  private read<T>(operation: () => T): Promise<T> {
     return this.serialized(async () => {
       await this.refreshReadTransaction();
       return operation();
     });
   }
-  public override async close(): Promise<void> {
+
+  public getEntry(value: Uint8Array) {
+    return this.read(() => this.state.getEntry(value));
+  }
+  public scanEntries(afterSeq: bigint, limit: number) {
+    return this.read(() => this.state.scanEntries(afterSeq, limit));
+  }
+  public loadCll() {
+    return this.read(() => this.state.cll());
+  }
+  public pendingWitnesses(now: Date, limit: number) {
+    return this.read(() => this.state.pendingWitnesses(now, limit));
+  }
+  public getWitness(witnessId: string, checkpointSize: bigint) {
+    return this.read(() => this.state.getWitness(witnessId, checkpointSize));
+  }
+
+  public async close(): Promise<void> {
     if (this.closed) return;
-    await this.operationQueue;
+    await this.queue;
+    this.closed = true;
     await this.pool.end();
-    await super.close();
   }
 }

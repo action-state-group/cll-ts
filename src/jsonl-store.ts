@@ -8,57 +8,51 @@ import {
   writeSync,
 } from "node:fs";
 import { flockSync } from "fs-ext";
-import { cloneCll, cloneRecord, cloneWitness } from "./clone.js";
-import { MemoryStore } from "./memory-store.js";
+import { addedWitnesses, BackendState } from "./backend-state.js";
 import {
-  envelopeFromWire,
-  envelopeToWire,
-  recordFromWire,
-  stateFromWire,
-  stateToWire,
+  cllFromWire,
+  cllToWire,
+  entryFromWire,
+  entryToWire,
   witnessFromWire,
-  type WireEnvelope,
-  type WireState,
+  witnessToWire,
+  type WireCllState,
+  type WireEntry,
   type WireWitness,
 } from "./serde.js";
 import {
-  LedgerError,
+  CllError,
+  limits,
   type AppendInput,
+  type CllBackend,
   type CllState,
-  type EnvelopeInput,
   type WitnessState,
 } from "./types.js";
 
-type WireRecord = WireState["records"][number];
-type WireCllDelta = Omit<WireState["cll"], "nodes" | "witnesses"> & {
-  nodes: string[];
-  witnesses: WireWitness[];
-};
 type JournalEvent =
-  | { version: 3; type: "log.init" }
-  | { version: 3; type: "capsule.append"; record: WireRecord }
+  | { version: 4; type: "cll.init" }
+  | { version: 4; type: "entry.append"; entry: WireEntry }
   | {
-      version: 3;
-      type: "envelope.add";
-      capsule_id: string;
-      envelope: WireEnvelope;
+      version: 4;
+      type: "cll.commit";
+      expected_size: string;
+      expected_checkpoint?: string;
+      state: WireCllState;
     }
-  | { version: 3; type: "cll.commit"; cll: WireCllDelta }
   | {
-      version: 3;
+      version: 4;
       type: "witness.commit";
       expected_attempts: number;
       witness: WireWitness;
     };
 
-/** Single-writer append-only JSONL store with bounded incremental v3 events. */
-export class JsonlStore extends MemoryStore {
-  private journalQueue: Promise<void> = Promise.resolve();
-  private closing = false;
+/** Single-writer append-only JSONL backend with fsync per complete event. */
+export class JsonlStore implements CllBackend {
+  private readonly state = new BackendState();
+  private queue: Promise<void> = Promise.resolve();
+  private closed = false;
 
-  private constructor(private readonly fd: number) {
-    super();
-  }
+  private constructor(private readonly fd: number) {}
 
   public static async open(path: string): Promise<JsonlStore> {
     const fd = openSync(path, "a+");
@@ -66,13 +60,11 @@ export class JsonlStore extends MemoryStore {
       flockSync(fd, "exnb");
     } catch (error) {
       closeSync(fd);
-      throw new LedgerError(
-        "contention",
-        "JSONL store is already open by another writer",
-        { cause: error },
-      );
+      throw new CllError("contention", "JSONL backend already has a writer", {
+        cause: error,
+      });
     }
-    const store = new JsonlStore(fd);
+    const backend = new JsonlStore(fd);
     try {
       const bytes = readFileSync(path);
       let validEnd = 0;
@@ -80,24 +72,27 @@ export class JsonlStore extends MemoryStore {
       for (let start = 0; start < bytes.length; ) {
         const end = bytes.indexOf(0x0a, start);
         if (end < 0) break;
-        const line = bytes.subarray(start, end).toString("utf8");
         try {
-          const raw = JSON.parse(line) as unknown;
-          if (
-            raw !== null &&
-            typeof raw === "object" &&
-            "v" in raw &&
-            (raw as { v: unknown }).v === 3 &&
-            "state" in raw
-          ) {
-            store.hydrate((raw as { state: WireState }).state);
-            initialized = true;
-          } else {
-            store.applyEvent(raw as JournalEvent);
-            initialized = true;
-          }
+          if (end - start > limits.journalEvent)
+            throw new CllError("corrupt", "JSONL event exceeds size limit");
+          const raw = JSON.parse(
+            bytes.subarray(start, end).toString("utf8"),
+          ) as {
+            version?: unknown;
+            v?: unknown;
+          };
+          if (raw.version !== 4)
+            throw new CllError(
+              "corrupt",
+              raw.version === 3 || raw.v === 3
+                ? "legacy JSONL schema version 3 is unsupported"
+                : "unsupported JSONL schema version",
+            );
+          backend.applyEvent(raw as JournalEvent);
+          initialized = true;
         } catch (error) {
-          throw new LedgerError(
+          if (error instanceof CllError) throw error;
+          throw new CllError(
             "corrupt",
             `corrupt complete JSONL line at byte ${start}`,
             { cause: error },
@@ -108,8 +103,8 @@ export class JsonlStore extends MemoryStore {
       }
       if (validEnd !== bytes.length) ftruncateSync(fd, validEnd);
       if (!initialized)
-        await store.appendEvent({ version: 3, type: "log.init" });
-      return store;
+        await backend.appendEvent({ version: 4, type: "cll.init" });
+      return backend;
     } catch (error) {
       flockSync(fd, "un");
       closeSync(fd);
@@ -117,272 +112,187 @@ export class JsonlStore extends MemoryStore {
     }
   }
 
-  private hydrate(wire: WireState): void {
-    const state = stateFromWire(wire);
-    this.replaceState(state.records, state.cll);
+  private ensureOpen(): void {
+    if (this.closed) throw new CllError("closed", "backend is closed");
   }
 
   private applyEvent(event: JournalEvent): void {
-    if (event.version !== 3) throw new Error("unsupported version");
-    if (event.type === "log.init") {
-      if (this.records.length !== 0 || this.cll.size !== 0n)
-        throw new Error("duplicate log initialization");
+    if (event.type === "cll.init") {
+      if (this.state.entries().length !== 0 || this.state.cll().size !== 0n)
+        throw new CllError("corrupt", "duplicate CLL initialization");
       return;
     }
-    if (event.type === "capsule.append") {
-      const decoded = recordFromWire(event.record);
-      if (
-        decoded.seq !== BigInt(this.records.length + 1) ||
-        this.byId.has(decoded.capsuleId)
-      )
-        throw new Error("invalid capsule append event");
-      this.records.push(decoded);
-      this.byId.set(decoded.capsuleId, decoded);
-      return;
-    }
-    if (event.type === "envelope.add") {
-      const record = this.byId.get(event.capsule_id);
-      if (record === undefined)
-        throw new Error("envelope references missing capsule");
-      const envelope = envelopeFromWire(event.envelope);
-      if (
-        record.envelopes.some(
-          (candidate) => candidate.digest === envelope.digest,
-        )
-      )
-        throw new Error("duplicate envelope event");
-      const updated = {
-        ...record,
-        envelopes: [...record.envelopes, envelope],
-      };
-      this.records[Number(record.seq - 1n)] = updated;
-      this.byId.set(record.capsuleId, updated);
+    if (event.type === "entry.append") {
+      const entry = entryFromWire(event.entry);
+      const result = this.state.append(entry);
+      if (result.outcome !== "inserted" || result.entry.seq !== entry.seq)
+        throw new CllError("corrupt", "invalid entry append event");
       return;
     }
     if (event.type === "cll.commit") {
-      const delta = stateFromWire({
-        records: [],
-        cll: event.cll,
-      }).cll;
-      const cll = {
-        ...delta,
-        nodes: [...this.cll.nodes, ...delta.nodes],
-        witnesses: [...this.cll.witnesses, ...delta.witnesses],
-      };
-      if (cll.size !== BigInt(cll.nodes.length))
-        throw new Error("invalid CLL event");
-      this.cll = cloneCll(cll);
+      const current = this.state.cll();
+      const delta = cllFromWire(event.state);
+      this.state.commitCll(
+        BigInt(event.expected_size),
+        event.expected_checkpoint === undefined
+          ? undefined
+          : Buffer.from(event.expected_checkpoint, "base64"),
+        {
+          ...delta,
+          nodes: [...current.nodes, ...delta.nodes],
+        },
+      );
       return;
     }
-    const witness = witnessFromWire(event.witness);
-    const index = this.cll.witnesses.findIndex(
-      (item) =>
-        item.witnessId === witness.witnessId &&
-        item.checkpointSize === witness.checkpointSize,
+    this.state.commitWitness(
+      event.expected_attempts,
+      witnessFromWire(event.witness),
     );
-    if (
-      index < 0 ||
-      this.cll.witnesses[index]!.attempts !== event.expected_attempts
-    )
-      throw new Error("invalid witness event");
-    const witnesses = [...this.cll.witnesses];
-    witnesses[index] = witness;
-    this.cll = { ...this.cll, witnesses };
   }
 
   private async appendEvent(event: JournalEvent): Promise<void> {
-    const line = `${JSON.stringify(event)}\n`;
-    if (Buffer.byteLength(line) > 4 * 1024 * 1024)
-      throw new LedgerError("invalid", "JSONL event exceeds 4 MiB");
-    const bytes = Buffer.from(line);
+    const bytes = Buffer.from(`${JSON.stringify(event)}\n`);
+    if (bytes.length > limits.journalEvent)
+      throw new CllError("invalid", "JSONL event exceeds size limit");
     const start = fstatSync(this.fd).size;
-    let written = 0;
-    while (written < bytes.length) {
-      const count = writeSync(
-        this.fd,
-        bytes,
-        written,
-        bytes.length - written,
-        start + written,
-      );
-      if (count <= 0) throw new Error("JSONL write made no progress");
-      written += count;
+    try {
+      let written = 0;
+      while (written < bytes.length) {
+        const count = writeSync(
+          this.fd,
+          bytes,
+          written,
+          bytes.length - written,
+          null,
+        );
+        if (count === 0) throw new Error("JSONL write made no progress");
+        written += count;
+      }
+      fsyncSync(this.fd);
+    } catch (error) {
+      try {
+        ftruncateSync(this.fd, start);
+        fsyncSync(this.fd);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "JSONL write and rollback both failed",
+        );
+      }
+      throw error;
     }
-    fsyncSync(this.fd);
   }
 
-  /** Keep each memory mutation and its durable event in one ordered unit. */
-  private async journalExclusive<T>(
-    operation: () => Promise<T>,
-    rollback: () => void,
+  private async mutate<T>(
+    operation: () => T,
+    event: (result: T) => JournalEvent | undefined,
   ): Promise<T> {
-    if (this.closing || this.closed)
-      throw new LedgerError("closed", "store is closed");
-    const prior = this.journalQueue;
+    const prior = this.queue;
     let release!: () => void;
-    this.journalQueue = new Promise<void>((resolve) => {
+    this.queue = new Promise<void>((resolve) => {
       release = resolve;
     });
     await prior;
     try {
-      if (this.closing || this.closed)
-        throw new LedgerError("closed", "store is closed");
-      const fileSize = fstatSync(this.fd).size;
-      try {
-        return await operation();
-      } catch (error) {
-        rollback();
-        try {
-          ftruncateSync(this.fd, fileSize);
-          fsyncSync(this.fd);
-        } catch (rollbackError) {
-          this.closed = true;
-          try {
-            flockSync(this.fd, "un");
-            closeSync(this.fd);
-          } catch {
-            // The descriptor may already be the reason rollback failed.
-          }
-          throw new LedgerError(
-            "corrupt",
-            "JSONL write failed and durable rollback could not be verified",
-            { cause: new AggregateError([error, rollbackError]) },
-          );
-        }
-        throw error;
-      }
+      this.ensureOpen();
+      return await this.state.persistMutation(operation, async (result) => {
+        const nextEvent = event(result);
+        if (nextEvent !== undefined) await this.appendEvent(nextEvent);
+      });
     } finally {
       release();
     }
   }
 
-  public override async append(input: AppendInput) {
-    let beforeLength: number | undefined;
-    return this.journalExclusive(
-      async () => {
-        beforeLength = this.records.length;
-        const result = await super.append(input);
-        if (result.outcome === "inserted") {
-          const wire = stateToWire([result.record], this.cll).records[0]!;
-          await this.appendEvent({
-            version: 3,
-            type: "capsule.append",
-            record: wire,
-          });
-        }
-        return result;
-      },
-      () => {
-        if (beforeLength === undefined) return;
-        while (this.records.length > beforeLength) {
-          const removed = this.records.pop()!;
-          this.byId.delete(removed.capsuleId);
-        }
-      },
+  public append(input: AppendInput) {
+    return this.mutate(
+      () => this.state.append(input),
+      (result) =>
+        result.outcome === "inserted"
+          ? {
+              version: 4,
+              type: "entry.append",
+              entry: entryToWire(result.entry),
+            }
+          : undefined,
     );
   }
 
-  public override async addEnvelope(input: EnvelopeInput) {
-    let snapshot: ReturnType<typeof cloneRecord> | undefined;
-    return this.journalExclusive(
-      async () => {
-        const before = this.byId.get(input.capsuleId);
-        snapshot = before === undefined ? undefined : cloneRecord(before);
-        const result = await super.addEnvelope(input);
-        if (result.outcome === "inserted")
-          await this.appendEvent({
-            version: 3,
-            type: "envelope.add",
-            capsule_id: input.capsuleId,
-            envelope: envelopeToWire(result.envelope),
-          });
-        return result;
-      },
-      () => {
-        if (snapshot === undefined) return;
-        this.records[Number(snapshot.seq - 1n)] = snapshot;
-        this.byId.set(snapshot.capsuleId, snapshot);
-      },
-    );
+  public async getEntry(value: Uint8Array) {
+    this.ensureOpen();
+    return this.state.getEntry(value);
   }
 
-  public override async commitCll(
+  public async scanEntries(afterSeq: bigint, limit: number) {
+    this.ensureOpen();
+    return this.state.scanEntries(afterSeq, limit);
+  }
+
+  public async loadCll() {
+    this.ensureOpen();
+    return this.state.cll();
+  }
+
+  public commitCll(
     expectedSize: bigint,
     expectedCheckpoint: Uint8Array | undefined,
     next: CllState,
-  ): Promise<void> {
-    let before: CllState | undefined;
-    await this.journalExclusive(
-      async () => {
-        before = cloneCll(this.cll);
-        const priorWitnesses = this.cll.witnesses;
-        await super.commitCll(expectedSize, expectedCheckpoint, next);
-        const wire = stateToWire([], this.cll).cll;
-        const newWitnesses = this.witnessDelta(
-          priorWitnesses,
-          this.cll.witnesses,
-        );
-        await this.appendEvent({
-          version: 3,
+  ) {
+    let before!: CllState;
+    return this.mutate(
+      () => {
+        before = this.state.cll();
+        this.state.commitCll(expectedSize, expectedCheckpoint, next);
+      },
+      () => {
+        const current = this.state.cll();
+        return {
+          version: 4,
           type: "cll.commit",
-          cll: {
-            ...wire,
-            nodes: wire.nodes.slice(Number(expectedSize)),
-            witnesses: wire.witnesses.slice(
-              wire.witnesses.length - newWitnesses.length,
-            ),
-          },
-        });
-      },
-      () => {
-        if (before === undefined) return;
-        this.cll = cloneCll(before);
-      },
-    );
-  }
-
-  public override async commitWitness(
-    expectedAttempts: number,
-    next: WitnessState,
-  ): Promise<void> {
-    let index = -1;
-    let before: WitnessState | undefined;
-    await this.journalExclusive(
-      async () => {
-        index = this.cll.witnesses.findIndex(
-          (item) =>
-            item.witnessId === next.witnessId &&
-            item.checkpointSize === next.checkpointSize,
-        );
-        before =
-          index < 0 ? undefined : cloneWitness(this.cll.witnesses[index]!);
-        await super.commitWitness(expectedAttempts, next);
-        const wire = stateToWire([], {
-          ...this.cll,
-          witnesses: [next],
-        }).cll.witnesses[0]!;
-        await this.appendEvent({
-          version: 3,
-          type: "witness.commit",
-          expected_attempts: expectedAttempts,
-          witness: wire,
-        });
-      },
-      () => {
-        if (before === undefined || index < 0) return;
-        const witnesses = [...this.cll.witnesses];
-        witnesses[index] = before;
-        this.cll = { ...this.cll, witnesses };
+          expected_size: String(expectedSize),
+          ...(expectedCheckpoint === undefined
+            ? {}
+            : {
+                expected_checkpoint:
+                  Buffer.from(expectedCheckpoint).toString("base64"),
+              }),
+          state: cllToWire({
+            ...current,
+            nodes: current.nodes.slice(before.nodes.length),
+            witnesses: addedWitnesses(before.witnesses, current.witnesses),
+          }),
+        };
       },
     );
   }
 
-  public override async close(): Promise<void> {
-    if (this.closed || this.closing) return;
-    this.closing = true;
-    await this.journalQueue;
+  public async pendingWitnesses(now: Date, limit: number) {
+    this.ensureOpen();
+    return this.state.pendingWitnesses(now, limit);
+  }
+
+  public async getWitness(witnessId: string, checkpointSize: bigint) {
+    this.ensureOpen();
+    return this.state.getWitness(witnessId, checkpointSize);
+  }
+
+  public commitWitness(expectedAttempts: number, next: WitnessState) {
+    return this.mutate(
+      () => this.state.commitWitness(expectedAttempts, next),
+      () => ({
+        version: 4,
+        type: "witness.commit",
+        expected_attempts: expectedAttempts,
+        witness: witnessToWire(next),
+      }),
+    );
+  }
+
+  public async close(): Promise<void> {
+    if (this.closed) return;
+    await this.queue;
+    this.closed = true;
     flockSync(this.fd, "un");
     closeSync(this.fd);
-    await super.close();
   }
 }

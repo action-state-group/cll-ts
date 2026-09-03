@@ -1,27 +1,11 @@
-import type { CllState, Envelope, Record, WitnessState } from "./types.js";
-export const cloneEnvelope = (value: Envelope): Envelope => ({
+import type { CllEntry, CllState, WitnessState } from "./types.js";
+
+export const cloneEntry = (value: CllEntry): CllEntry => ({
   ...value,
-  bytes: Uint8Array.from(value.bytes),
-  addedAt: new Date(value.addedAt),
-  verification: {
-    ...value.verification,
-    findings: value.verification.findings.map((item) => ({ ...item })),
-    ...(value.verification.publicKey === undefined
-      ? {}
-      : { publicKey: Uint8Array.from(value.verification.publicKey) }),
-  },
-});
-export const cloneRecord = (value: Record): Record => ({
-  ...value,
-  capsule: Uint8Array.from(value.capsule),
-  envelopes: value.envelopes.map(cloneEnvelope),
+  value: Uint8Array.from(value.value),
   appendedAt: new Date(value.appendedAt),
-  verification: {
-    ...value.verification,
-    findings: value.verification.findings.map((item) => ({ ...item })),
-    assurance: { ...value.verification.assurance },
-  },
 });
+
 export const cloneWitness = (value: WitnessState): WitnessState => ({
   ...value,
   checkpoint: Uint8Array.from(value.checkpoint),
@@ -30,6 +14,7 @@ export const cloneWitness = (value: WitnessState): WitnessState => ({
     ? {}
     : { receipt: Uint8Array.from(value.receipt) }),
 });
+
 export const cloneCll = (value: CllState): CllState => ({
   ...value,
   nodes: value.nodes.map((item) => Uint8Array.from(item)),

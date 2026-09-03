@@ -1,7 +1,7 @@
 import {
-  LedgerError,
+  CllError,
   limits,
-  type CllStore,
+  type WitnessStateStore,
   type WitnessState,
 } from "./types.js";
 import { verifyCheckpoint } from "./checkpoint.js";
@@ -9,24 +9,24 @@ import { waitForInterval } from "./run-loop.js";
 
 export interface WitnessClient {
   readonly id: string;
-  submit(checkpoint: Uint8Array, signal?: AbortSignal): Promise<AnchorReceipt>;
+  submit(checkpoint: Uint8Array, signal?: AbortSignal): Promise<WitnessReceipt>;
 }
-export interface AnchorReceipt {
+export interface WitnessReceipt {
   readonly bytes: Uint8Array;
-  readonly entryHash: string;
-  readonly entryHashScheme: "legacy";
-  readonly leafIndex: number;
-  readonly treeSize: number;
+  readonly entryHash?: string;
+  readonly entryHashScheme?: "legacy";
+  readonly leafIndex?: number;
+  readonly treeSize?: number;
 }
 export interface ReceiptVerification {
-  verify(checkpoint: Uint8Array, receipt: AnchorReceipt): boolean;
+  verify(checkpoint: Uint8Array, receipt: WitnessReceipt): boolean;
 }
 export interface WitnessDeliveryRunnerOptions {
   readonly verifiers: ReadonlyMap<string, ReceiptVerification>;
   readonly now?: () => Date;
   readonly pollIntervalMs?: number;
 }
-export class CapsuleAnchorClient implements WitnessClient {
+export class HttpWitnessClient implements WitnessClient {
   private readonly baseUrl: URL;
   public constructor(
     public readonly id: string,
@@ -48,7 +48,7 @@ export class CapsuleAnchorClient implements WitnessClient {
   public async submit(
     checkpoint: Uint8Array,
     signal?: AbortSignal,
-  ): Promise<AnchorReceipt> {
+  ): Promise<WitnessReceipt> {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const combined =
       signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
@@ -72,22 +72,19 @@ export class CapsuleAnchorClient implements WitnessClient {
         length += value.length;
         if (length > limits.receipt) {
           await reader.cancel();
-          throw new LedgerError(
-            "admission_rejected",
-            "witness response too large",
-          );
+          throw new CllError("rejected", "witness response too large");
         }
         chunks.push(value);
       }
     }
     const bytes = Buffer.concat(chunks, length);
     if (!response.ok)
-      throw new LedgerError(
+      throw new CllError(
         response.status === 408 ||
         response.status === 429 ||
         response.status >= 500
           ? "contention"
-          : "admission_rejected",
+          : "rejected",
         `witness rejected checkpoint: HTTP ${response.status}`,
       );
     let wire: unknown;
@@ -96,25 +93,20 @@ export class CapsuleAnchorClient implements WitnessClient {
         new TextDecoder("utf-8", { fatal: true }).decode(bytes),
       );
     } catch (error) {
-      throw new LedgerError(
-        "admission_rejected",
-        "invalid witness JSON response",
-        { cause: error },
-      );
+      throw new CllError("rejected", "invalid witness JSON response", {
+        cause: error,
+      });
     }
     if (wire === null || typeof wire !== "object" || Array.isArray(wire))
-      throw new LedgerError("admission_rejected", "invalid witness response");
+      throw new CllError("rejected", "invalid witness response");
     const receipt = wire as Record<string, unknown>;
     if (receipt.entry_hash_scheme !== "legacy")
-      throw new LedgerError(
-        "admission_rejected",
-        "unsupported witness entry_hash_scheme",
-      );
+      throw new CllError("rejected", "unsupported witness entry_hash_scheme");
     if (
       typeof receipt.entry_hash !== "string" ||
       !/^[0-9a-f]{64}$/u.test(receipt.entry_hash)
     )
-      throw new LedgerError("admission_rejected", "invalid witness entry_hash");
+      throw new CllError("rejected", "invalid witness entry_hash");
     if (
       !Number.isSafeInteger(receipt.tree_size) ||
       (receipt.tree_size as number) < 1 ||
@@ -122,23 +114,17 @@ export class CapsuleAnchorClient implements WitnessClient {
       (receipt.leaf_index as number) < 0 ||
       (receipt.leaf_index as number) >= (receipt.tree_size as number)
     )
-      throw new LedgerError(
-        "admission_rejected",
-        "invalid witness tree position",
-      );
+      throw new CllError("rejected", "invalid witness tree position");
     if (
       typeof receipt.receipt_b64 !== "string" ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
         receipt.receipt_b64,
       )
     )
-      throw new LedgerError(
-        "admission_rejected",
-        "invalid witness receipt_b64",
-      );
+      throw new CllError("rejected", "invalid witness receipt_b64");
     const decoded = Buffer.from(receipt.receipt_b64, "base64");
     if (decoded.length === 0)
-      throw new LedgerError("admission_rejected", "empty witness receipt");
+      throw new CllError("rejected", "empty witness receipt");
     return {
       bytes: decoded,
       entryHash: receipt.entry_hash,
@@ -164,7 +150,7 @@ export class WitnessDeliveryRunner {
   private running = false;
 
   public constructor(
-    private readonly store: CllStore,
+    private readonly store: WitnessStateStore,
     private readonly clients: ReadonlyMap<string, WitnessClient>,
     options: WitnessDeliveryRunnerOptions,
   ) {
@@ -178,7 +164,7 @@ export class WitnessDeliveryRunner {
   /** Run the host-controlled polling lifecycle until its signal is aborted. */
   public async run(signal: AbortSignal): Promise<void> {
     if (this.running)
-      throw new LedgerError("invalid", "witness runner is already running");
+      throw new CllError("invalid", "witness runner is already running");
     if (signal.aborted) return;
     this.running = true;
     try {
@@ -186,7 +172,7 @@ export class WitnessDeliveryRunner {
         try {
           await this.runOnce(limits.witnesses, signal);
         } catch (error) {
-          if (!(error instanceof LedgerError) || error.code !== "contention")
+          if (!(error instanceof CllError) || error.code !== "contention")
             throw error;
         }
         await waitForInterval(signal, this.pollIntervalMs);
@@ -234,35 +220,27 @@ export class WitnessDeliveryRunner {
     let completed = 0;
     try {
       if (!verifyCheckpoint(item.checkpoint))
-        throw new LedgerError(
+        throw new CllError(
           "corrupt",
           "stored checkpoint failed offline verification",
         );
       if (client === undefined)
-        throw new LedgerError(
-          "admission_rejected",
-          "witness client is not configured",
-        );
+        throw new CllError("invalid", "witness client is not configured");
       const verifier = this.verifiers.get(item.witnessId);
       if (verifier === undefined)
-        throw new LedgerError(
-          "admission_rejected",
-          "receipt verifier is not configured",
-        );
+        throw new CllError("invalid", "receipt verifier is not configured");
       const receipt = await client.submit(item.checkpoint, signal);
       let verified = false;
       try {
         verified = verifier.verify(item.checkpoint, receipt);
       } catch (error) {
-        throw new LedgerError(
-          "admission_rejected",
-          "witness receipt verifier failed",
-          { cause: error },
-        );
+        throw new CllError("rejected", "witness receipt verifier failed", {
+          cause: error,
+        });
       }
       if (!verified)
-        throw new LedgerError(
-          "admission_rejected",
+        throw new CllError(
+          "rejected",
           "witness receipt failed offline verification",
         );
       const { lastError: _lastError, ...withoutLastError } = item;
@@ -270,18 +248,26 @@ export class WitnessDeliveryRunner {
         ...withoutLastError,
         attempts: item.attempts + 1,
         receipt: receipt.bytes,
-        entryHash: receipt.entryHash,
-        entryHashScheme: receipt.entryHashScheme,
-        leafIndex: receipt.leafIndex,
-        treeSize: receipt.treeSize,
+        ...(receipt.entryHash === undefined
+          ? {}
+          : { entryHash: receipt.entryHash }),
+        ...(receipt.entryHashScheme === undefined
+          ? {}
+          : { entryHashScheme: receipt.entryHashScheme }),
+        ...(receipt.leafIndex === undefined
+          ? {}
+          : { leafIndex: receipt.leafIndex }),
+        ...(receipt.treeSize === undefined
+          ? {}
+          : { treeSize: receipt.treeSize }),
         nextAttemptAt: this.now(),
       };
       completed = 1;
     } catch (error) {
       if (signal?.aborted) return 0;
       const permanent =
-        error instanceof LedgerError &&
-        (error.code === "admission_rejected" || error.code === "corrupt");
+        error instanceof CllError &&
+        (error.code === "rejected" || error.code === "corrupt");
       next = {
         ...item,
         attempts: item.attempts + 1,

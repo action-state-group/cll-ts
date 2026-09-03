@@ -17,144 +17,115 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Check out cll-ts
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          path: cll-ts
-      - name: Check out capsule-emit-ts main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: action-state-group/capsule-emit-ts
-          ref: main
-          path: capsule-emit-ts
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: |
-            capsule-emit-ts/package-lock.json
-            cll-ts/package-lock.json
-      - name: Build capsule-emit-ts main
-        run: npm ci && npm run build
-        working-directory: capsule-emit-ts
-      - name: Install dependencies
-        run: npm ci
-        working-directory: cll-ts
-      - name: Check formatting
-        run: npm run format:check
-        working-directory: cll-ts
-      - name: Lint
-        run: npm run lint
-        working-directory: cll-ts
-      - name: Typecheck
-        run: npm run typecheck
-        working-directory: cll-ts
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
 
-  test-and-build:
+  unit-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Check out cll-ts
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: cll-ts
-      - name: Check out capsule-emit-ts main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: action-state-group/capsule-emit-ts
-          ref: main
-          path: capsule-emit-ts
-      - name: Check out Python reference main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: action-state-group/checkpointed-local-log
           ref: main
           path: checkpointed-local-log
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: |
-            capsule-emit-ts/package-lock.json
-            cll-ts/package-lock.json
-      - name: Build capsule-emit-ts main
-        run: npm ci && npm run build
-        working-directory: capsule-emit-ts
-      - name: Install dependencies
-        run: npm ci
+          cache-dependency-path: cll-ts/package-lock.json
+      - run: npm ci
         working-directory: cll-ts
-      - name: Test
-        run: npm test
+      - run: npm run build
         working-directory: cll-ts
-      - name: Build
-        run: npm run build
+      - run: npx vitest run --coverage --exclude test/mysql.test.ts
         working-directory: cll-ts
+
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run test/mysql.test.ts
 
   interoperability:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check out cll-ts
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: cll-ts
-      - name: Check out capsule-emit-ts main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: action-state-group/capsule-emit-ts
-          ref: main
-          path: capsule-emit-ts
-      - name: Check out cll-go main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: action-state-group/cll-go
           ref: main
           path: cll-go
-      - name: Check out Python reference main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: action-state-group/checkpointed-local-log
           ref: main
           path: checkpointed-local-log
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: |
-            capsule-emit-ts/package-lock.json
-            cll-ts/package-lock.json
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+          cache-dependency-path: cll-ts/package-lock.json
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v5
         with:
           go-version-file: cll-go/go.mod
           cache-dependency-path: cll-go/go.sum
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - name: Build capsule-emit-ts main
-        run: npm ci && npm run build
-        working-directory: capsule-emit-ts
-      - name: Build cll-ts
-        run: npm ci && npm run build
+      - run: npm ci && npm run build
         working-directory: cll-ts
-      - name: Install Python reference main
-        run: python -m pip install ./checkpointed-local-log
-      - name: Verify Go, TypeScript, and Python checkpoint interoperability
+      - run: python -m pip install ./checkpointed-local-log
+      - name: Verify TypeScript, Go, and Python checkpoints
         shell: bash
         run: |
           interop_dir=$(mktemp -d)
           trap 'rm -rf "$interop_dir"' EXIT
-
           node cll-ts/test/interop/checkpoint.mjs write "$interop_dir/ts.cose"
           go -C cll-go run ./test/interop/checkpoint/main.go verify "$interop_dir/ts.cose"
-
           go -C cll-go run ./test/interop/checkpoint/main.go write "$interop_dir/go.cose"
           node cll-ts/test/interop/checkpoint.mjs verify "$interop_dir/go.cose"
-
           python cll-ts/test/interop/verify_checkpoint.py "$interop_dir/ts.cose"
           python cll-ts/test/interop/verify_checkpoint.py "$interop_dir/go.cose"
           cmp "$interop_dir/ts.cose" "$interop_dir/go.cose"
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci && npm run build
+      - name: Install packed artifact and import every entry point
+        shell: bash
+        run: |
+          package_dir=$(mktemp -d)
+          consumer_dir=$(mktemp -d)
+          trap 'rm -rf "$package_dir" "$consumer_dir"' EXIT
+          npm pack --pack-destination "$package_dir"
+          cd "$consumer_dir"
+          npm init -y
+          npm install "$package_dir"/*.tgz
+          node -e 'await import("@action-state-group/cll"); await import("@action-state-group/cll/jsonl"); await import("@action-state-group/cll/sqlite"); await import("@action-state-group/cll/mysql")'

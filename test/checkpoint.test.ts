@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEd25519Identity } from "capsule-emit-ts";
+
 import {
   CheckpointRunner,
-  LedgerError,
-  LedgerService,
+  CllError,
+  createCheckpointIdentity,
   MemoryStore,
   MmrTree,
   WitnessDeliveryRunner,
@@ -40,7 +40,7 @@ describe("checkpoint COSE", () => {
         appendedAt,
       },
     ]);
-    const identity = createEd25519Identity(
+    const identity = createCheckpointIdentity(
       Buffer.from(
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "hex",
@@ -66,7 +66,7 @@ describe("checkpoint COSE", () => {
         appendedAt: new Date(Number.NaN),
       },
     ]);
-    const identity = createEd25519Identity(Buffer.alloc(32));
+    const identity = createCheckpointIdentity(Buffer.alloc(32));
     const runner = new CheckpointRunner(store, {
       logId: "invalid-time-log",
       identity,
@@ -77,8 +77,8 @@ describe("checkpoint COSE", () => {
 
   it("signs a self-verifying first checkpoint", () => {
     const tree = new MmrTree();
-    tree.appendCapsuleId("11".repeat(32));
-    const identity = createEd25519Identity(
+    tree.append(Buffer.from("11".repeat(32), "hex"));
+    const identity = createCheckpointIdentity(
       Buffer.from(
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "hex",
@@ -103,20 +103,11 @@ describe("checkpoint COSE", () => {
   });
   it("persists checkpoint and lets permanent witness failure coexist with success", async () => {
     const store = new MemoryStore();
-    const service = new LedgerService(
-      store,
-      {},
-      () => new Date("2026-09-01T12:34:56Z"),
-    );
-    const capsule = (await import("capsule-emit-ts")).build({
-      actionId: "runner-1",
-      actionType: "fyi",
-      operator: "test",
-      developer: "test@v1",
-      timestamp: "2026-09-01T12:00:00Z",
+    await store.append({
+      value: Uint8Array.from({ length: 32 }, () => 0x11),
+      appendedAt: new Date("2026-09-01T12:34:56Z"),
     });
-    await service.append("unsigned", capsule.json);
-    const identity = createEd25519Identity(
+    const identity = createCheckpointIdentity(
       Buffer.from(
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "hex",
@@ -137,16 +128,12 @@ describe("checkpoint COSE", () => {
       id: "good",
       submit: async () => ({
         bytes: Uint8Array.of(1, 2, 3),
-        entryHash: "11".repeat(32),
-        entryHashScheme: "legacy",
-        leafIndex: 0,
-        treeSize: 1,
       }),
     };
     const bad: WitnessClient = {
       id: "bad",
       submit: async () => {
-        throw new LedgerError("admission_rejected", "rejected");
+        throw new CllError("rejected", "rejected");
       },
     };
     const delivery = new WitnessDeliveryRunner(
@@ -167,13 +154,14 @@ describe("checkpoint COSE", () => {
     expect((await store.getWitness("good", 1n))?.receipt).toEqual(
       Uint8Array.of(1, 2, 3),
     );
+    expect((await store.getWitness("good", 1n))?.entryHash).toBeUndefined();
     expect((await store.getWitness("bad", 1n))?.permanent).toBe(true);
     await store.close();
   });
   it("does not let a slow witness starve an independent witness", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.appendCapsuleId("11".repeat(32));
+    tree.append(Buffer.from("11".repeat(32), "hex"));
     const signed = signCheckpoint({
       logId: "parallel-witnesses",
       mmrSize: tree.size,
@@ -181,7 +169,7 @@ describe("checkpoint COSE", () => {
       previousSize: 0n,
       previousPeaks: [],
       timestamp: "2026-09-01T12:00:00Z",
-      identity: createEd25519Identity(new Uint8Array(32)),
+      identity: createCheckpointIdentity(new Uint8Array(32)),
     });
     const witness = (witnessId: string) => ({
       witnessId,
@@ -242,10 +230,10 @@ describe("checkpoint COSE", () => {
     await store.close();
   });
 
-  it("fails closed before persisting an unverified receipt", async () => {
+  it("fails closed and retries when a verifier is not configured", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.appendCapsuleId("11".repeat(32));
+    tree.append(Buffer.from("11".repeat(32), "hex"));
     const signed = signCheckpoint({
       logId: "unverified",
       mmrSize: tree.size,
@@ -253,7 +241,7 @@ describe("checkpoint COSE", () => {
       previousSize: 0n,
       previousPeaks: [],
       timestamp: "2026-09-01T12:00:00Z",
-      identity: createEd25519Identity(new Uint8Array(32)),
+      identity: createCheckpointIdentity(new Uint8Array(32)),
     });
     await store.commitCll(0n, undefined, {
       size: 0n,
@@ -291,15 +279,16 @@ describe("checkpoint COSE", () => {
     );
     expect(await delivery.runOnce()).toBe(0);
     const state = await store.getWitness("unverified", 1n);
-    expect(state?.permanent).toBe(true);
+    expect(state?.permanent).toBe(false);
+    expect(state?.attempts).toBe(1);
     expect(state?.receipt).toBeUndefined();
     await store.close();
   });
   it("backs retryable witness failures off without marking them permanent", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.appendCapsuleId("11".repeat(32));
-    const identity = createEd25519Identity(new Uint8Array(32));
+    tree.append(Buffer.from("11".repeat(32), "hex"));
+    const identity = createCheckpointIdentity(new Uint8Array(32));
     const signed = signCheckpoint({
       logId: "retryable",
       mmrSize: tree.size,
@@ -333,7 +322,7 @@ describe("checkpoint COSE", () => {
           {
             id: "retryable",
             submit: async () => {
-              throw new LedgerError("contention", "retry later");
+              throw new CllError("contention", "retry later");
             },
           },
         ],
@@ -352,7 +341,7 @@ describe("checkpoint COSE", () => {
   });
   it("runs and stops both polling lifecycles without duplicate starts", async () => {
     const store = new MemoryStore();
-    const identity = createEd25519Identity(new Uint8Array(32));
+    const identity = createCheckpointIdentity(new Uint8Array(32));
     const checkpoint = new CheckpointRunner(store, {
       logId: "lifecycle",
       identity,
@@ -362,7 +351,7 @@ describe("checkpoint COSE", () => {
     const checkpointRun = checkpoint.run(checkpointAbort.signal);
     await expect(
       checkpoint.run(new AbortController().signal),
-    ).rejects.toMatchObject({ code: "invalid" } satisfies Partial<LedgerError>);
+    ).rejects.toMatchObject({ code: "invalid" } satisfies Partial<CllError>);
     checkpointAbort.abort();
     await checkpointRun;
 
@@ -374,7 +363,7 @@ describe("checkpoint COSE", () => {
     const deliveryRun = delivery.run(deliveryAbort.signal);
     await expect(
       delivery.run(new AbortController().signal),
-    ).rejects.toMatchObject({ code: "invalid" } satisfies Partial<LedgerError>);
+    ).rejects.toMatchObject({ code: "invalid" } satisfies Partial<CllError>);
     deliveryAbort.abort();
     await deliveryRun;
 
@@ -389,7 +378,7 @@ describe("checkpoint COSE", () => {
   it("aborts an in-flight witness request without recording a failed attempt", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.appendCapsuleId("11".repeat(32));
+    tree.append(Buffer.from("11".repeat(32), "hex"));
     const signed = signCheckpoint({
       logId: "abort-request",
       mmrSize: tree.size,
@@ -397,7 +386,7 @@ describe("checkpoint COSE", () => {
       previousSize: 0n,
       previousPeaks: [],
       timestamp: "2026-09-01T12:00:00Z",
-      identity: createEd25519Identity(new Uint8Array(32)),
+      identity: createCheckpointIdentity(new Uint8Array(32)),
     });
     await store.commitCll(0n, undefined, {
       size: 0n,
@@ -449,11 +438,11 @@ describe("checkpoint COSE", () => {
     expect((await store.getWitness("abort-request", 1n))?.attempts).toBe(0);
     await store.close();
   });
-  it("reports a corrupt stored checkpoint size as LedgerError", async () => {
+  it("rejects a checkpoint size beyond stored CLL state", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.appendCapsuleId("11".repeat(32));
-    const identity = createEd25519Identity(new Uint8Array(32));
+    tree.append(Buffer.from("11".repeat(32), "hex"));
+    const identity = createCheckpointIdentity(new Uint8Array(32));
     const signed = signCheckpoint({
       logId: "corrupt-size",
       mmrSize: tree.size,
@@ -463,43 +452,32 @@ describe("checkpoint COSE", () => {
       timestamp: "2026-09-01T12:00:00Z",
       identity,
     });
-    await store.commitCll(0n, undefined, {
-      size: tree.size,
-      nodes: tree.nodes(),
-      indexedSeq: 1n,
-      checkpoint: signed.cose,
-      checkpointSize: 2n,
-      checkpointIndexedSeq: 1n,
-      checkpointPeaks: tree.peakHashes(),
-      witnesses: [],
-    });
-    const runner = new CheckpointRunner(store, {
-      logId: "corrupt-size",
-      identity,
-    });
     await expect(
-      runner.run(new AbortController().signal),
+      store.commitCll(0n, undefined, {
+        size: tree.size,
+        nodes: tree.nodes(),
+        indexedSeq: 1n,
+        checkpoint: signed.cose,
+        checkpointSize: 2n,
+        checkpointIndexedSeq: 1n,
+        checkpointPeaks: tree.peakHashes(),
+        witnesses: [],
+      }),
     ).rejects.toMatchObject({
-      code: "corrupt",
-    } satisfies Partial<LedgerError>);
+      code: "invalid",
+    } satisfies Partial<CllError>);
     await store.close();
   });
 
   it("rejects competing checkpoints at the same MMR size", async () => {
     const store = new MemoryStore();
     const appendClock = () => new Date("2026-09-01T12:00:00Z");
-    const service = new LedgerService(store, {}, appendClock);
-    for (const actionId of ["race-1", "race-2", "race-3"]) {
-      const capsule = (await import("capsule-emit-ts")).build({
-        actionId,
-        actionType: "fyi",
-        operator: "test",
-        developer: "test@v1",
-        timestamp: appendClock(),
+    for (const byte of [1, 2, 3])
+      await store.append({
+        value: Uint8Array.from({ length: 32 }, () => byte),
+        appendedAt: appendClock(),
       });
-      await service.append("unsigned", capsule.json);
-    }
-    const identity = createEd25519Identity(new Uint8Array(32));
+    const identity = createCheckpointIdentity(new Uint8Array(32));
     const indexing = new CheckpointRunner(store, {
       logId: "checkpoint-race",
       identity,
@@ -552,7 +530,7 @@ describe("checkpoint COSE", () => {
       ),
     ).rejects.toMatchObject({
       code: "contention",
-    } satisfies Partial<LedgerError>);
+    } satisfies Partial<CllError>);
     await store.close();
   });
 });

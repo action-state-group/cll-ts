@@ -173,13 +173,6 @@ export class MmrTree {
       }
     }
   }
-  public appendCapsuleId(capsuleId: string): bigint {
-    if (!/^[0-9a-f]{64}$/u.test(capsuleId))
-      throw new TypeError(
-        "capsule id must be 64 lowercase hexadecimal characters",
-      );
-    return this.append(Buffer.from(capsuleId, "hex"));
-  }
   /** Commit an application-neutral 32-byte record identity as the next CLL leaf. */
   public append(value: Uint8Array): bigint {
     if (value.length !== 32)
@@ -303,23 +296,6 @@ export function leafCount(size: bigint): bigint | undefined {
     else high = middle - 1n;
   }
   return undefined;
-}
-
-export function verifyInclusion(
-  root: Uint8Array,
-  mmrSize: bigint,
-  leafIndex: bigint,
-  capsuleId: string,
-  proof: readonly Uint8Array[],
-): boolean {
-  if (!/^[0-9a-f]{64}$/u.test(capsuleId)) return false;
-  return verifyInclusionValue(
-    root,
-    mmrSize,
-    leafIndex,
-    Buffer.from(capsuleId, "hex"),
-    proof,
-  );
 }
 
 export function verifyInclusionValue(

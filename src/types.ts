@@ -1,66 +1,42 @@
-import type { VerificationResult } from "capsule-emit-ts/aac";
+import type { KeyObject } from "node:crypto";
 
 export const limits = Object.freeze({
-  capsule: 1 << 20,
-  envelope: 4096,
-  envelopes: 64,
+  entryBytes: 32,
   witnesses: 32,
   checkpointPayload: 64 << 10,
+  journalEvent: 4 << 20,
   receipt: 2 << 20,
   identifier: 191,
   reason: 4096,
   scanDefault: 100,
   scanMax: 1000,
 });
-export type AdmissionMode = "unsigned" | "signed";
-export type Authenticity = AdmissionMode;
+
 export type AppendOutcome = "inserted" | "idempotent";
-export type AddOutcome = "inserted" | "idempotent";
-export interface EnvelopeVerification {
-  readonly ok: boolean;
-  readonly findings: readonly {
-    readonly code: string;
-    readonly detail: string;
-  }[];
-  readonly publicKey?: Uint8Array;
-}
-export interface Envelope {
-  readonly digest: string;
-  readonly bytes: Uint8Array;
-  readonly verification: EnvelopeVerification;
-  readonly addedAt: Date;
-}
-export interface Record {
-  readonly seq: bigint;
-  readonly capsuleId: string;
-  readonly capsule: Uint8Array;
-  readonly authenticity: Authenticity;
-  readonly envelopes: readonly Envelope[];
-  readonly verification: VerificationResult;
-  readonly parentId?: string;
-  readonly appendedAt: Date;
-}
-export interface LogEntry {
-  readonly seq: bigint;
-  readonly capsuleId: string;
-  readonly appendedAt: Date;
-}
-/** One dense, 1-based CLL entry with a 32-byte identity and valid append time. */
+
+/** One dense, 1-based CLL entry with an opaque 32-byte value. */
 export interface CllEntry {
   readonly seq: bigint;
   readonly value: Uint8Array;
   readonly appendedAt: Date;
 }
-export interface ChainGap {
-  readonly seq: bigint;
-  readonly capsuleId: string;
-  readonly parentId: string;
+
+export interface AppendInput {
+  readonly value: Uint8Array;
+  readonly appendedAt: Date;
 }
-export interface AppendInput extends Omit<Record, "seq"> {}
-export interface EnvelopeInput {
-  readonly capsuleId: string;
-  readonly envelope: Envelope;
+
+export interface AppendResult {
+  readonly entry: CllEntry;
+  readonly outcome: AppendOutcome;
 }
+
+/** Structural signer contract accepted by checkpoint creation. */
+export interface CheckpointSigningIdentity {
+  readonly privateKey: KeyObject;
+  readonly publicKey: Uint8Array;
+}
+
 export interface WitnessState {
   readonly witnessId: string;
   readonly checkpointSize: bigint;
@@ -75,6 +51,7 @@ export interface WitnessState {
   readonly permanent: boolean;
   readonly lastError?: string;
 }
+
 export interface CllState {
   readonly size: bigint;
   readonly nodes: readonly Uint8Array[];
@@ -86,18 +63,26 @@ export interface CllState {
   readonly checkpointPeaks?: readonly Uint8Array[];
   readonly witnesses: readonly WitnessState[];
 }
-/** Bounded application-neutral source consumed by checkpointing. */
-export interface CllSource {
-  scanEntries(after: bigint, limit: number): Promise<readonly CllEntry[]>;
+
+export interface EntrySource {
+  scanEntries(afterSeq: bigint, limit: number): Promise<readonly CllEntry[]>;
 }
-/** Durable CLL state independent of an application's record API. */
-export interface CllStore {
+
+export interface EntryStore extends EntrySource {
+  append(input: AppendInput): Promise<AppendResult>;
+  getEntry(value: Uint8Array): Promise<CllEntry>;
+}
+
+export interface CheckpointStateStore {
   loadCll(): Promise<CllState>;
   commitCll(
     expectedSize: bigint,
     expectedCheckpoint: Uint8Array | undefined,
     next: CllState,
   ): Promise<void>;
+}
+
+export interface WitnessStateStore {
   pendingWitnesses(now: Date, limit: number): Promise<readonly WitnessState[]>;
   getWitness(
     witnessId: string,
@@ -105,38 +90,36 @@ export interface CllStore {
   ): Promise<WitnessState | undefined>;
   commitWitness(expectedAttempts: number, next: WitnessState): Promise<void>;
 }
-export interface CheckpointStore extends CllSource, CllStore {}
 
-/** AAC ledger binding plus the generic CLL contracts. */
-export interface Store extends CheckpointStore {
-  append(
-    input: AppendInput,
-  ): Promise<{ readonly record: Record; readonly outcome: AppendOutcome }>;
-  addEnvelope(
-    input: EnvelopeInput,
-  ): Promise<{ readonly envelope: Envelope; readonly outcome: AddOutcome }>;
-  get(capsuleId: string): Promise<Record>;
-  scan(after: bigint, limit: number): Promise<readonly Record[]>;
-  scanIds(after: bigint, limit: number): Promise<readonly LogEntry[]>;
-  findChainGaps(): Promise<readonly ChainGap[]>;
+export interface CheckpointStore
+  extends EntrySource,
+    CheckpointStateStore,
+    WitnessStateStore {}
+
+/** Complete generic persistence contract implemented by every backend. */
+export interface CllBackend
+  extends EntryStore,
+    CheckpointStateStore,
+    WitnessStateStore {
   close(): Promise<void>;
 }
 
-export class LedgerError extends Error {
+export type CllErrorCode =
+  | "not_found"
+  | "invalid"
+  | "corrupt"
+  | "closed"
+  | "contention"
+  | "rejected";
+
+export class CllError extends Error {
   public constructor(
-    public readonly code:
-      | "not_found"
-      | "invalid"
-      | "immutable_conflict"
-      | "corrupt"
-      | "closed"
-      | "contention"
-      | "admission_rejected",
+    public readonly code: CllErrorCode,
     message: string,
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = "LedgerError";
+    this.name = "CllError";
   }
 }
 
@@ -147,7 +130,7 @@ export function validateIdentifier(value: string): void {
     length > limits.identifier ||
     !/^[A-Za-z0-9._:/-]+$/u.test(value)
   )
-    throw new LedgerError(
+    throw new CllError(
       "invalid",
       "identifier must be 1..191 UTF-8 bytes in the portable subset",
     );

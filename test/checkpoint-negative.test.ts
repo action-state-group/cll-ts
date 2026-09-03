@@ -1,20 +1,21 @@
 import { sign as edSign } from "node:crypto";
-import { createEd25519Identity } from "capsule-emit-ts";
+
 import { decode, encode, rfc8949EncodeOptions } from "cborg";
 import { describe, expect, it } from "vitest";
 import {
+  createCheckpointIdentity,
   MmrTree,
   signCheckpoint,
   verifyCheckpoint,
   type SignedCheckpoint,
 } from "../src/index.js";
 
-const identity = createEd25519Identity(new Uint8Array(32));
+const identity = createCheckpointIdentity(new Uint8Array(32));
 const canonical = (value: unknown): Uint8Array =>
   encode(value, rfc8949EncodeOptions);
 const firstTree = (): MmrTree => {
   const tree = new MmrTree();
-  tree.appendCapsuleId("11".repeat(32));
+  tree.append(Buffer.from("11".repeat(32), "hex"));
   return tree;
 };
 const firstCheckpoint = (timestamp = "2026-09-01T12:34:56Z") => {
@@ -107,7 +108,7 @@ describe("checkpoint verifier negative boundaries", () => {
   it("rejects an authenticated invalid consistency proof", () => {
     const tree = firstTree();
     const previousPeaks = tree.peakHashes();
-    tree.appendCapsuleId("22".repeat(32));
+    tree.append(Buffer.from("22".repeat(32), "hex"));
     const proof = tree.consistencyProof(1n);
     const checkpoint = signCheckpoint({
       logId: "negative-test",

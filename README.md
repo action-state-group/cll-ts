@@ -1,221 +1,214 @@
-# cll-ts
+# @action-state-group/cll
 
-An embeddable TypeScript Checkpointed Local Log (CLL). It maintains an MMR,
-signs checkpoint COSE statements, verifies proofs and receipts, and durably
-retries independent witness deliveries.
-
-The CLL entry boundary is application-neutral. The included AAC binding verifies
-Capsule admission, allocates contiguous local sequence numbers, preserves exact
-Capsule and Producer Envelope bytes, and projects each verified Capsule ID into
-one CLL leaf. Capsules are a use case of the local log, not its definition.
+A generic TypeScript implementation of a Checkpointed Local Log (CLL). It
+stores opaque 32-byte entry values, builds an append-only Merkle Mountain Range,
+signs checkpoints, and delivers them to witnesses. It does not interpret the
+records whose identities are appended.
 
 ## Install
 
-Node.js 24 or newer is required. The package is not yet published to npm. Its
-current development dependency points to a sibling `capsule-emit-ts` checkout.
+Node.js 24 or newer is required.
 
 ```sh
-git clone https://github.com/action-state-group/capsule-emit-ts.git
-git clone https://github.com/action-state-group/cll-ts.git
-cd capsule-emit-ts && npm ci && npm run build
-cd ../cll-ts && npm ci && npm run build
+npm install @action-state-group/cll
 ```
 
-## End to end: producer, ledger, checkpoint, and witness
+Install only the database driver path you use. The root import does not load
+SQLite or MySQL native modules.
 
-The producer key signs the independent Producer Envelope. The checkpoint key
-signs the local CLL checkpoint. A separately provisioned witness authority key
-verifies the external receipt. These are three distinct trust roles.
+## Append and checkpoint
 
 ```ts
-import { randomBytes } from "node:crypto";
-import { createEd25519Identity, seal } from "capsule-emit-ts";
 import {
-  CapsuleAnchorClient,
   CheckpointRunner,
-  LedgerService,
+  MemoryStore,
+  createCheckpointIdentity,
+} from "@action-state-group/cll";
+
+const backend = new MemoryStore();
+const recordIdentity = new Uint8Array(32); // digest or another opaque identity
+
+const result = await backend.append({
+  value: recordIdentity,
+  appendedAt: new Date(),
+});
+
+console.log(result.entry.seq, result.outcome); // 1n, "inserted"
+
+const runner = new CheckpointRunner(backend, {
+  logId: "example-log",
+  identity: createCheckpointIdentity(
+    crypto.getRandomValues(new Uint8Array(32)),
+  ),
+  entryCadence: 100,
+  ageCadenceMs: 15 * 60_000,
+});
+
+await runner.runOnce();
+```
+
+Appending the same 32-byte value again is idempotent. It returns the original
+entry and does not change its sequence or append time. Sequences are dense and
+1-based.
+
+## Witness delivery
+
+Every ID in `CheckpointRunner.witnessIds` needs both a `WitnessClient` and a
+`ReceiptVerification` entry under the same ID. Missing local configuration is
+retryable and fails closed; receipt bytes are persisted as success only after
+the configured verifier accepts them. A rejected or corrupt receipt is marked
+permanent so polling does not repeatedly submit the same checkpoint.
+
+```ts
+import {
+  HttpWitnessClient,
   ReceiptVerifier,
-  SqliteStore,
   WitnessDeliveryRunner,
-} from "cll-ts";
+} from "@action-state-group/cll";
 
-const logId = "example-investigations";
-const witnessId = "production-witness";
-const producerIdentity = createEd25519Identity(randomBytes(32));
-const checkpointIdentity = createEd25519Identity(randomBytes(32));
+const witness = new HttpWitnessClient(
+  "public-witness",
+  new URL("https://witness.example"),
+);
+const delivery = new WitnessDeliveryRunner(
+  backend,
+  new Map([[witness.id, witness]]),
+  {
+    verifiers: new Map([
+      [witness.id, new ReceiptVerifier(pinnedWitnessEd25519PublicKey)],
+    ]),
+  },
+);
+await delivery.runOnce();
+```
 
-// Provision this from independent witness trust material in production.
-declare const pinnedWitnessAuthorityPublicKey: Uint8Array;
+`HttpWitnessClient` sends the raw checkpoint COSE bytes to `POST /checkpoints`
+with content type `application/cll-checkpoint+cbor`. It expects JSON containing
+`receipt_b64`, `entry_hash_scheme: "legacy"`, a lowercase 64-hex `entry_hash`,
+and integer `leaf_index` and `tree_size`. `ReceiptVerifier` validates that RFC
+9162-style receipt against a pinned Ed25519 authority key. Other witness
+protocols implement `WitnessClient` and `ReceiptVerification`; their receipt may
+contain only opaque `bytes`.
 
-const store = SqliteStore.open("ledger.sqlite", logId);
-try {
-  const ledger = new LedgerService(store, {
-    "effect.type": new Set(["example.publish"]),
-  });
-  const produced = seal({
-    capsule: {
-      actionId: "investigation/123",
-      actionType: "fyi",
-      operator: "example-org",
-      developer: "example-agent@v1",
-      timestamp: new Date("2026-09-02T12:00:00Z"),
-    },
-    payload: { issue: 123, finding: "example" },
-    identity: producerIdentity,
-  });
+After correcting an external condition that caused a permanent failure, an
+operator may load the row with `getWitness` and reset it with `commitWitness`
+using its current `attempts` value as the compare-and-swap token.
 
-  const record = await ledger.append("signed", produced.payload, [
-    produced.envelope,
-  ]);
-  console.log(`stored seq=${record.seq} capsule_id=${record.capsuleId}`);
+## Backends
 
-  // Cadence 1 is illustrative so one append immediately produces a checkpoint.
-  const checkpointRunner = new CheckpointRunner(store, {
-    logId,
-    identity: checkpointIdentity,
-    witnessIds: [witnessId],
-    entryCadence: 1,
-  });
-  const checkpoint = await checkpointRunner.runOnce();
-  if (checkpoint === undefined)
-    throw new Error("checkpoint runner made no progress");
+All included backends implement `CllBackend` directly and run the same contract
+suite.
 
-  const anchor = new CapsuleAnchorClient(
-    witnessId,
-    new URL("https://witness.example"),
-  );
-  const verifier = new ReceiptVerifier(pinnedWitnessAuthorityPublicKey);
-  const deliveryRunner = new WitnessDeliveryRunner(
-    store,
-    new Map([[witnessId, anchor]]),
-    { verifiers: new Map([[witnessId, verifier]]) },
-  );
-  const delivered = await deliveryRunner.runOnce();
-  if (delivered !== 1) throw new Error("checkpoint was not delivered");
+```ts
+import { MemoryStore } from "@action-state-group/cll";
+import { JsonlStore } from "@action-state-group/cll/jsonl";
+import { SqliteStore } from "@action-state-group/cll/sqlite";
+import { MysqlStore } from "@action-state-group/cll/mysql";
 
-  const state = await store.loadCll();
-  const witness = await store.getWitness(witnessId, state.checkpointSize!);
-  if (witness?.receipt === undefined || witness.permanent) {
-    throw new Error("witness receipt is not verified");
+const memory = new MemoryStore();
+const jsonl = await JsonlStore.open("./events.jsonl");
+const sqlite = SqliteStore.open("./cll.sqlite", "example-log");
+const mysql = await MysqlStore.open(process.env.MYSQL_URL!, "example-log");
+```
+
+- Memory is process-local and intended for tests or ephemeral use.
+- JSONL is single-writer, append-only, fsyncs complete events, truncates an
+  incomplete tail after a crash, and rejects version 3 files.
+- SQLite uses WAL and serializes writes across handles for the same file/log.
+- MySQL uses InnoDB transactions and locks the log metadata row while assigning
+  sequences or updating checkpoint state.
+
+SQLite and MySQL currently rebuild the selected log's in-memory view from all
+entry, node, and witness rows at the start of each read or write transaction.
+This favors simple snapshot correctness and is linear in stored log size. It is
+not a high-throughput query design for logs with millions of entries.
+
+## Compose with capsule-emit
+
+AAC is one possible application of CLL. The two packages are independent. The
+application verifies and stores the full application record, then appends only
+its verified 32-byte identity to CLL.
+
+```ts
+import { build, verifyCapsule } from "@action-state-group/capsule-emit";
+import { MysqlStore } from "@action-state-group/cll/mysql";
+
+const built = build({
+  actionId: "deploy-42",
+  actionType: "fyi",
+  operator: "matt",
+  developer: "example@v1",
+  timestamp: new Date(),
+});
+
+verifyCapsule(built.json); // returns verified metadata or throws
+
+// The application persists built.json and any Producer Envelope separately.
+const cll = await MysqlStore.open(process.env.MYSQL_URL!, "application-log");
+await cll.append({
+  value: Buffer.from(built.capsuleId, "hex"),
+  appendedAt: new Date(),
+});
+```
+
+Neither package imports the other at runtime. A project that needs both installs
+both explicitly.
+
+## Implement another backend
+
+TypeScript interfaces are structural. A class does not need to extend an SDK
+base class; it must implement every operation with the documented semantics.
+
+```ts
+import type {
+  AppendInput,
+  AppendResult,
+  CllBackend,
+  CllEntry,
+  CllState,
+  WitnessState,
+} from "@action-state-group/cll";
+
+export class PostgresBackend implements CllBackend {
+  append(input: AppendInput): Promise<AppendResult> {
+    throw new Error("implement atomically");
   }
-} finally {
-  await store.close();
+  getEntry(value: Uint8Array): Promise<CllEntry> {
+    throw new Error("implement");
+  }
+  scanEntries(afterSeq: bigint, limit: number): Promise<readonly CllEntry[]> {
+    throw new Error("implement");
+  }
+  loadCll(): Promise<CllState> {
+    throw new Error("implement from one consistent snapshot");
+  }
+  commitCll(
+    expectedSize: bigint,
+    expectedCheckpoint: Uint8Array | undefined,
+    next: CllState,
+  ): Promise<void> {
+    throw new Error("implement append-only compare-and-swap");
+  }
+  pendingWitnesses(now: Date, limit: number): Promise<readonly WitnessState[]> {
+    throw new Error("implement");
+  }
+  getWitness(id: string, size: bigint): Promise<WitnessState | undefined> {
+    throw new Error("implement");
+  }
+  commitWitness(expectedAttempts: number, next: WitnessState): Promise<void> {
+    throw new Error("implement compare-and-swap");
+  }
+  close(): Promise<void> {
+    throw new Error("implement idempotently");
+  }
 }
 ```
 
-The call path is:
+Run the repository's
+[backend contract](https://github.com/action-state-group/cll-ts/blob/main/test/backend-contract.ts)
+unchanged against the new backend. Durable implementations must persist every mutation, return defensive
+copies, allocate dense sequences transactionally, provide consistent reads,
+enforce checkpoint and witness compare-and-swap, detect corrupt state, and make
+`close()` idempotent.
 
-```text
-seal
-  -> Capsule + independent Producer Envelope
-LedgerService.append
-  -> verified durable AAC record with a gapless local sequence
-CheckpointRunner.runOnce
-  -> generic entry projection + durable MMR checkpoint + pending witness row
-WitnessDeliveryRunner.runOnce
-  -> POST /checkpoints + offline pinned-key receipt verification
-```
-
-No import starts a timer, background task, or network call. Hosts explicitly own
-runner lifecycle and cancellation.
-
-## Storage
-
-Choose one included AAC ledger backend:
-
-```ts
-import { JsonlStore, MysqlStore, SqliteStore } from "cll-ts";
-
-const jsonl = await JsonlStore.open("./example-log.jsonl");
-const sqlite = SqliteStore.open("./ledger.sqlite", "example-log");
-declare const mysqlUri: string;
-const mysql = await MysqlStore.open(mysqlUri, "example-log");
-```
-
-JSONL holds a non-blocking operating-system `flock` for its lifetime and fsyncs
-each complete version-3 event. SQLite uses WAL and immediate write transactions.
-MySQL locks the log metadata row with `SELECT ... FOR UPDATE`.
-
-The TypeScript JSONL v3 journal is not the Go backend's on-disk schema despite
-sharing a version number. Direct file migration in either direction is not
-supported; migrate through the public data model or an explicit converter.
-
-SQLite and MySQL use normalized record, envelope, MMR-node, and witness tables.
-They currently reconstruct the selected log's in-memory view on reads and
-transaction starts, so those reads are linear in stored records, envelopes,
-nodes, and witnesses. The schemas provide transactional parity and multi-handle
-correctness, not a high-throughput query claim.
-
-`MemoryStore` is the in-memory contract implementation. An independently
-implemented `Store` must preserve admission, idempotency, ordering, defensive
-copy, CLL compare-and-swap, and witness-merge semantics.
-
-## Generic CLL entry boundary
-
-`CllEntry` carries a dense 1-based `seq`, an exact 32-byte record identity in
-`value`, and a valid `appendedAt` timestamp.
-`CllSource.scanEntries(after, limit)` is the narrow projection consumed by the
-checkpoint runner. The AAC stores implement it by decoding each verified
-lowercase Capsule ID into 32 leaf bytes. A different application can implement
-`CheckpointStore` with its own ordered record identity without importing AAC
-types.
-
-The MMR leaf rule is:
-
-```text
-leaf = SHA256(0x00 || entry_value_32)
-```
-
-The fixed width preserves leaf/interior domain separation while retaining the
-existing Python and Go vectors. Application profiles own the 32-byte record
-identity; the CLL owns ordering, commitment, checkpointing, and witness
-continuity. `verifyInclusionValue` verifies generic entries, while
-`verifyInclusion` remains the AAC Capsule-ID compatibility helper.
-
-## Runner lifecycle and receipt trust
-
-Use `run(signal)` when the host wants library-owned polling, or `runOnce()` when
-an external scheduler owns cadence:
-
-```ts
-const abort = new AbortController();
-const running = Promise.all([
-  checkpointRunner.run(abort.signal),
-  deliveryRunner.run(abort.signal),
-]);
-
-// During host shutdown:
-abort.abort();
-await running;
-```
-
-Aborting the signal stops the polling interval and resolves the run promise.
-Concurrent `run` calls on one runner are rejected. Receipt verifiers are
-caller-injected pinned trust. A missing or failing verifier produces a permanent,
-fail-closed delivery outcome; unverified receipt bytes are never persisted as a
-trusted success.
-
-## Audit and interoperability
-
-`LedgerService.audit(bound)` returns one result per durable record. Decodable
-records are verified together so chain and other store-level findings are
-preserved; an isolated decode failure is returned on that record as `error`.
-
-CI runs formatting, strict typecheck, lint, coverage, frozen AAC and Producer
-Envelope corpora, Go/Python format-4 fixtures, MMR and checkpoint vectors,
-SQLite persistence/concurrency, and MySQL 8 through Testcontainers. Passing
-TypeScript unit tests alone is not treated as interoperability proof.
-
-## Development
-
-```sh
-npm install
-npm run check
-npm run build
-```
-
-The MySQL integration suite starts a MySQL 8.4 Testcontainer and requires Docker.
-
-## License
-
-Apache-2.0.
+See [DESIGN.md](DESIGN.md) for state and durability invariants.

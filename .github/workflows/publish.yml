@@ -1,0 +1,88 @@
+name: Publish npm package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: cll-ts
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          path: cll-ts
+
+      - name: Check out checkpoint reference main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: action-state-group/checkpointed-local-log
+          ref: main
+          path: checkpointed-local-log
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check package
+        run: npm run check
+        env:
+          CLL_ROOT: ../checkpointed-local-log
+
+      - name: Build package
+        run: npm run build
+
+      - name: Publish package if needed
+        id: publish
+        shell: bash
+        run: |
+          package_name=$(node -p "require('./package.json').name")
+          package_version=$(node -p "require('./package.json').version")
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+
+          if npm view "$package_name@$package_version" version >published-version.txt 2>view-error.txt; then
+            test "$(cat published-version.txt)" = "$package_version"
+            echo "$package_name@$package_version is already published; skipping npm publish."
+          elif grep -q "E404" view-error.txt; then
+            npm publish
+          else
+            cat view-error.txt >&2
+            exit 1
+          fi
+
+      - name: Tag published commit
+        env:
+          PACKAGE_VERSION: ${{ steps.publish.outputs.package_version }}
+        shell: bash
+        run: |
+          tag="v$PACKAGE_VERSION"
+          remote_tag=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")
+          if [[ -n "$remote_tag" ]]; then
+            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+            test "$(git rev-list -n 1 "$tag")" = "$GITHUB_SHA"
+            echo "$tag already points to this commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "Release $tag"
+            git push origin "refs/tags/$tag"
+          fi
