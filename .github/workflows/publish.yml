@@ -68,8 +68,10 @@ jobs:
           if npm view "$package_name@$package_version" version >published-version.txt 2>view-error.txt; then
             test "$(cat published-version.txt)" = "$package_version"
             echo "$package_name@$package_version is already published; skipping npm publish."
+            echo "published_now=false" >> "$GITHUB_OUTPUT"
           elif grep -q "E404" view-error.txt; then
             npm publish
+            echo "published_now=true" >> "$GITHUB_OUTPUT"
           else
             cat view-error.txt >&2
             exit 1
@@ -79,10 +81,15 @@ jobs:
         env:
           PACKAGE_NAME: ${{ steps.publish.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.publish.outputs.package_version }}
+          PUBLISHED_NOW: ${{ steps.publish.outputs.published_now }}
         shell: bash
         run: |
           tag="v$PACKAGE_VERSION"
-          published_git_head=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" gitHead)
+          if [[ "$PUBLISHED_NOW" = "true" ]]; then
+            published_git_head="$GITHUB_SHA"
+          else
+            published_git_head=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" gitHead)
+          fi
           if [[ -z "$published_git_head" ]]; then
             echo "$PACKAGE_NAME@$PACKAGE_VERSION does not expose gitHead." >&2
             exit 1
