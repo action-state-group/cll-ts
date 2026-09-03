@@ -223,10 +223,23 @@ GitHub Action:
    and wait for `main` CI to pass.
 2. In GitHub, open the workflow, choose **Run workflow**, and select `main`.
 3. Verify the workflow published `@action-state-group/cll` and created the
-   annotated `v<version>` tag on the published commit.
+   `v<version>` GitHub release and tag on the published commit.
 
 The npm package must have a GitHub Actions trusted publisher configured for
 the `action-state-group/cll-ts` repository and
 `.github/workflows/publish.yml`. No long-lived npm token is required. Re-running
 the workflow is safe: it skips an existing npm version and verifies that its
 Git tag points to the `gitHead` recorded by npm.
+
+If npm contains the version but its tag is missing after this workflow has
+changed, GitHub may reject recovery with the workflow's `GITHUB_TOKEN`. A
+maintainer with `workflow` scope must create the tag at the npm `gitHead`, then
+rerun the workflow to verify the tag and create any missing GitHub release:
+
+```sh
+version=0.1.1
+git_head=$(npm view "@action-state-group/cll@$version" gitHead)
+git fetch origin --tags
+git tag -a "v$version" "$git_head" -m "Release v$version"
+git push origin "refs/tags/v$version"
+```

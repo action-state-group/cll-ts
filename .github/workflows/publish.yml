@@ -101,28 +101,20 @@ jobs:
             git fetch origin "refs/tags/$tag:refs/tags/$tag"
             test "$(git rev-list -n 1 "$tag")" = "$published_git_head"
             echo "$tag already points to the npm-published commit."
+            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --verify-tag \
+                --title "$tag" \
+                --notes "npm release $PACKAGE_NAME@$PACKAGE_VERSION"
+            fi
           else
-            tag_object_sha=$(
-              jq -n \
-                --arg tag "$tag" \
-                --arg message "Release $tag" \
-                --arg object "$published_git_head" \
-                --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                '{
-                  tag: $tag,
-                  message: $message,
-                  object: $object,
-                  type: "commit",
-                  tagger: {
-                    name: "github-actions[bot]",
-                    email: "41898282+github-actions[bot]@users.noreply.github.com",
-                    date: $date
-                  }
-                }' |
-                gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" --input - --jq .sha
-            )
-            test -n "$tag_object_sha"
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              --field ref="refs/tags/$tag" \
-              --field sha="$tag_object_sha" >/dev/null
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$published_git_head" \
+              --title "$tag" \
+              --notes "npm release $PACKAGE_NAME@$PACKAGE_VERSION"
           fi
+
+          git fetch origin "refs/tags/$tag:refs/tags/$tag"
+          test "$(git rev-list -n 1 "$tag")" = "$published_git_head"
