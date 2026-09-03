@@ -5,6 +5,7 @@ import {
   commitmentObject,
   MmrTree,
   verifyConsistency,
+  verifyHexInclusion,
   verifyInclusionValue,
 } from "../src/index.js";
 
@@ -67,6 +68,27 @@ describe("CLL MMR", () => {
       ).toBe(false);
     }
     expect(() => tree.append(Uint8Array.of(1))).toThrow("exactly 32 bytes");
+  });
+
+  it("supports canonical hexadecimal identities like cll-go", () => {
+    const identity = "ab".repeat(32);
+    const tree = new MmrTree();
+    tree.appendHexIdentity(identity);
+    expect(verifyHexInclusion(tree.root(), tree.size, 0n, identity, [])).toBe(
+      true,
+    );
+    expect(
+      verifyHexInclusion(
+        tree.root(),
+        tree.size,
+        0n,
+        identity.toUpperCase(),
+        [],
+      ),
+    ).toBe(false);
+    expect(() => tree.appendHexIdentity(identity.toUpperCase())).toThrow(
+      "lowercase hexadecimal",
+    );
   });
 
   it("proves append-only extension from a historical size", () => {

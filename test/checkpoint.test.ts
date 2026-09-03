@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CheckpointRunner,
   CllError,
+  checkpointEntryHash,
+  checkpointMetadata,
   createCheckpointIdentity,
   MemoryStore,
   MmrTree,
@@ -50,11 +52,14 @@ describe("checkpoint COSE", () => {
       logId: "generic-log",
       identity,
       entryCadence: 1,
+      scanLimit: 1,
       clock: () => appendedAt,
     });
 
+    const scan = vi.spyOn(store, "scanEntries");
     const checkpoint = await runner.runOnce();
     expect(checkpoint).toBeDefined();
+    expect(scan.mock.calls.every(([, limit]) => limit === 1)).toBe(true);
     expect((await store.loadCll()).indexedSeq).toBe(1n);
   });
 
@@ -94,6 +99,16 @@ describe("checkpoint COSE", () => {
       identity,
     });
     expect(verifyCheckpoint(checkpoint.cose)).toBe(true);
+    expect(checkpointMetadata(checkpoint.cose)).toMatchObject({
+      logId: "test-log",
+      size: tree.size,
+      root: checkpoint.root,
+      previousSize: 0n,
+      previousRoot: "",
+      keyId: checkpoint.keyId,
+      timestamp: checkpoint.timestamp,
+    });
+    expect(checkpointEntryHash(checkpoint.cose)).toHaveLength(32);
     expect(checkpoint.previousRoot).toBe("");
     expect(checkpoint.json.length).toBeGreaterThan(0);
     const tampered = Uint8Array.from(checkpoint.cose);
@@ -101,6 +116,27 @@ describe("checkpoint COSE", () => {
     tampered[last] = (tampered[last] ?? 0) ^ 1;
     expect(verifyCheckpoint(tampered)).toBe(false);
   });
+  it("rejects an invalid checkpoint cadence before signing", () => {
+    const tree = new MmrTree();
+    tree.append(new Uint8Array(32));
+    const identity = createCheckpointIdentity(new Uint8Array(32));
+    const input = {
+      logId: "cadence-log",
+      mmrSize: tree.size,
+      peaks: tree.peakHashes(),
+      previousSize: 0n,
+      previousPeaks: [],
+      timestamp: new Date(0),
+      identity,
+    };
+    expect(() => signCheckpoint({ ...input, cadence: 0 })).toThrow(
+      "positive portable integer",
+    );
+    expect(() =>
+      signCheckpoint({ ...input, cadence: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toThrow("positive portable integer");
+  });
+
   it("persists checkpoint and lets permanent witness failure coexist with success", async () => {
     const store = new MemoryStore();
     await store.append({
@@ -308,7 +344,7 @@ describe("checkpoint COSE", () => {
           witnessId: "retryable",
           checkpointSize: 1n,
           checkpoint: signed.cose,
-          attempts: 0,
+          attempts: 2,
           nextAttemptAt: now,
           permanent: false,
         },
@@ -330,13 +366,46 @@ describe("checkpoint COSE", () => {
       {
         verifiers: new Map([["retryable", { verify: () => true }]]),
         now: () => now,
+        baseBackoffMs: 1_000,
+        maxBackoffMs: 2_500,
       },
     );
     expect(await delivery.runOnce()).toBe(0);
     const state = await store.getWitness("retryable", 1n);
-    expect(state?.attempts).toBe(1);
+    expect(state?.attempts).toBe(3);
     expect(state?.permanent).toBe(false);
-    expect(state?.nextAttemptAt.valueOf()).toBe(now.valueOf() + 1_000);
+    expect(state?.nextAttemptAt.valueOf()).toBe(now.valueOf() + 2_500);
+    await store.close();
+  });
+
+  it("wakes both polling lifecycles when notified", async () => {
+    const store = new MemoryStore();
+    const checkpoint = new CheckpointRunner(store, {
+      logId: "notify",
+      identity: createCheckpointIdentity(new Uint8Array(32)),
+      pollIntervalMs: 60_000,
+    });
+    const load = vi.spyOn(store, "loadCll");
+    const checkpointAbort = new AbortController();
+    const checkpointRun = checkpoint.run(checkpointAbort.signal);
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    checkpoint.notify();
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    checkpointAbort.abort();
+    await checkpointRun;
+
+    const delivery = new WitnessDeliveryRunner(store, new Map(), {
+      verifiers: new Map(),
+      pollIntervalMs: 60_000,
+    });
+    const pending = vi.spyOn(store, "pendingWitnesses");
+    const deliveryAbort = new AbortController();
+    const deliveryRun = delivery.run(deliveryAbort.signal);
+    await vi.waitFor(() => expect(pending).toHaveBeenCalledTimes(1));
+    delivery.notify();
+    await vi.waitFor(() => expect(pending).toHaveBeenCalledTimes(2));
+    deliveryAbort.abort();
+    await deliveryRun;
     await store.close();
   });
   it("runs and stops both polling lifecycles without duplicate starts", async () => {

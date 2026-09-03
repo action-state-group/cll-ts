@@ -31,6 +31,73 @@ export const addedWitnesses = (
   return after.filter((item) => !existing.has(witnessKey(item)));
 };
 
+export function validateAppendInput(input: AppendInput): void {
+  if (
+    input.value.length !== limits.entryBytes ||
+    !Number.isFinite(input.appendedAt.valueOf())
+  )
+    throw new CllError(
+      "invalid",
+      "entry must have 32 bytes and a valid append time",
+    );
+}
+
+export function validateEntryValue(value: Uint8Array): void {
+  if (value.length !== limits.entryBytes)
+    throw new CllError("invalid", "entry value must be 32 bytes");
+}
+
+export function validateEntryScan(afterSeq: bigint, limit: number): void {
+  if (
+    afterSeq < 0n ||
+    afterSeq > BigInt(Number.MAX_SAFE_INTEGER) ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > limits.scanMax
+  )
+    throw new CllError("invalid", "invalid entry scan");
+}
+
+const emptyCll = (witnesses: readonly WitnessState[] = []): CllState => ({
+  size: 0n,
+  nodes: [],
+  indexedSeq: 0n,
+  witnesses,
+});
+
+/** Apply the shared CLL transition rules without requiring entry state. */
+export function applyCll(
+  current: CllState,
+  expectedSize: bigint,
+  expectedCheckpoint: Uint8Array | undefined,
+  next: CllState,
+): CllState {
+  const state = new BackendState(current);
+  state.commitCll(expectedSize, expectedCheckpoint, next);
+  return state.cll();
+}
+
+/** Select due witnesses through the same rules used by in-memory backends. */
+export function selectPendingWitnesses(
+  witnesses: readonly WitnessState[],
+  now: Date,
+  limit: number,
+): readonly WitnessState[] {
+  const state = new BackendState(emptyCll(witnesses));
+  return state.pendingWitnesses(now, limit);
+}
+
+/** Apply one witness compare-and-set transition without loading unrelated rows. */
+export function applyWitness(
+  current: WitnessState,
+  expectedAttempts: number,
+  next: WitnessState,
+): WitnessState {
+  const state = new BackendState(emptyCll([current]));
+  state.commitWitness(expectedAttempts, next);
+  return state.getWitness(next.witnessId, next.checkpointSize)!;
+}
+
 /** Shared invariant engine. Durable backends compose it and persist every mutation. */
 export class BackendState {
   private entries_: CllEntry[] = [];
@@ -41,6 +108,10 @@ export class BackendState {
     indexedSeq: 0n,
     witnesses: [],
   };
+
+  public constructor(cll?: CllState) {
+    if (cll !== undefined) this.cll_ = cloneCll(cll);
+  }
 
   public entries(): readonly CllEntry[] {
     return this.entries_.map(cloneEntry);
@@ -75,39 +146,8 @@ export class BackendState {
     }
   }
 
-  public replace(entries: readonly CllEntry[], cll: CllState): void {
-    if (
-      entries.some(
-        (entry, index) =>
-          entry.seq !== BigInt(index + 1) ||
-          entry.value.length !== limits.entryBytes,
-      )
-    )
-      throw new CllError("corrupt", "stored CLL entries are not contiguous");
-    const keys = entries.map((entry) =>
-      Buffer.from(entry.value).toString("hex"),
-    );
-    if (new Set(keys).size !== keys.length)
-      throw new CllError("corrupt", "stored CLL entries contain duplicates");
-    this.entries_ = entries.map(cloneEntry);
-    this.byValue = new Map(
-      this.entries_.map((entry) => [
-        Buffer.from(entry.value).toString("hex"),
-        entry,
-      ]),
-    );
-    this.cll_ = cloneCll(cll);
-  }
-
   public append(input: AppendInput): AppendResult {
-    if (
-      input.value.length !== limits.entryBytes ||
-      !Number.isFinite(input.appendedAt.valueOf())
-    )
-      throw new CllError(
-        "invalid",
-        "entry must have 32 bytes and a valid append time",
-      );
+    validateAppendInput(input);
     const key = Buffer.from(input.value).toString("hex");
     const existing = this.byValue.get(key);
     if (existing !== undefined)
@@ -123,16 +163,14 @@ export class BackendState {
   }
 
   public getEntry(value: Uint8Array): CllEntry {
-    if (value.length !== limits.entryBytes)
-      throw new CllError("invalid", "entry value must be 32 bytes");
+    validateEntryValue(value);
     const entry = this.byValue.get(Buffer.from(value).toString("hex"));
     if (entry === undefined) throw new CllError("not_found", "entry not found");
     return cloneEntry(entry);
   }
 
   public scanEntries(afterSeq: bigint, limit: number): readonly CllEntry[] {
-    if (afterSeq < 0n || limit < 1 || limit > limits.scanMax)
-      throw new CllError("invalid", "invalid entry scan");
+    validateEntryScan(afterSeq, limit);
     const start =
       afterSeq >= BigInt(this.entries_.length)
         ? this.entries_.length
@@ -249,6 +287,7 @@ export class BackendState {
   public pendingWitnesses(now: Date, limit: number): readonly WitnessState[] {
     if (
       !Number.isFinite(now.valueOf()) ||
+      !Number.isSafeInteger(limit) ||
       limit < 1 ||
       limit > limits.witnesses
     )

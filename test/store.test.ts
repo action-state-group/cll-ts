@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { CllError, MemoryStore, type CllBackend } from "../src/index.js";
 import { JsonlStore } from "../src/jsonl.js";
@@ -43,6 +44,54 @@ describe("shared backend contract", () => {
     open.push(reopened);
     expect(await reopened.scanEntries(0n, 10)).toHaveLength(2);
     expect((await reopened.loadCll()).indexedSeq).toBe(2n);
+  });
+
+  it("SQLite writes fail closed if log metadata disappears", async () => {
+    const path = join(
+      mkdtempSync(join(tmpdir(), "cll-sqlite-missing-meta-")),
+      "cll.sqlite",
+    );
+    const backend = SqliteStore.open(path, "missing-meta");
+    open.push(backend);
+    const external = new Database(path);
+    try {
+      external
+        .prepare("DELETE FROM cll_meta WHERE log_id=?")
+        .run("missing-meta");
+    } finally {
+      external.close();
+    }
+    await expect(
+      backend.append({ value: new Uint8Array(32), appendedAt: new Date(0) }),
+    ).rejects.toMatchObject({ code: "corrupt" } satisfies Partial<CllError>);
+  });
+
+  it("SQLite rejects an entry sequence gap when reopened", async () => {
+    const path = join(
+      mkdtempSync(join(tmpdir(), "cll-sqlite-entry-gap-")),
+      "cll.sqlite",
+    );
+    const backend = SqliteStore.open(path, "entry-gap");
+    await backend.append({
+      value: new Uint8Array(32),
+      appendedAt: new Date(0),
+    });
+    await backend.append({
+      value: new Uint8Array(32).fill(1),
+      appendedAt: new Date(1),
+    });
+    await backend.close();
+    const external = new Database(path);
+    try {
+      external
+        .prepare("DELETE FROM cll_entries WHERE log_id=? AND seq=1")
+        .run("entry-gap");
+    } finally {
+      external.close();
+    }
+    expect(() => SqliteStore.open(path, "entry-gap")).toThrowError(
+      expect.objectContaining({ code: "corrupt" }),
+    );
   });
 
   it("JSONL rejects a second writer and truncates only a torn tail", async () => {

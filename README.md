@@ -42,9 +42,11 @@ const runner = new CheckpointRunner(backend, {
   ),
   entryCadence: 100,
   ageCadenceMs: 15 * 60_000,
+  scanLimit: 100,
 });
 
 await runner.runOnce();
+runner.notify(); // wake runner.run(signal) after a new append
 ```
 
 Appending the same 32-byte value again is idempotent. It returns the original
@@ -77,6 +79,9 @@ const delivery = new WitnessDeliveryRunner(
     verifiers: new Map([
       [witness.id, new ReceiptVerifier(pinnedWitnessEd25519PublicKey)],
     ]),
+    baseBackoffMs: 1_000,
+    maxBackoffMs: 60 * 60_000,
+    jitter: false,
   },
 );
 await delivery.runOnce();
@@ -135,10 +140,38 @@ logs. The caller must provide an existing database and credentials allowed to
 create and access these tables. They do not contain full application records,
 Capsules, or Producer Envelopes; the application persists those separately.
 
-SQLite and MySQL currently rebuild the selected log's in-memory view from all
-entry, node, and witness rows at the start of each read or write transaction.
-This favors simple snapshot correctness and is linear in stored log size. It is
-not a high-throughput query design for logs with millions of entries.
+SQLite and MySQL validate the complete selected log when opening it. Normal
+entry lookup, bounded scans, appends, witness lookup, and witness CAS use indexed
+queries without rebuilding the log. `loadCll()` and `commitCll()` read metadata,
+MMR nodes, and witnesses as one consistent CLL snapshot, but do not read record
+entries.
+
+## MMR and checkpoint inspection
+
+Go and TypeScript expose the same core MMR and checkpoint capabilities using
+language-idiomatic names and types:
+
+```ts
+import {
+  MmrTree,
+  checkpointEntryHash,
+  checkpointMetadata,
+  verifyHexInclusion,
+} from "@action-state-group/cll";
+
+const tree = new MmrTree();
+const identity = "ab".repeat(32);
+tree.appendHexIdentity(identity);
+const proof = tree.inclusionProof(0n);
+verifyHexInclusion(tree.root(), tree.size, 0n, identity, proof);
+
+const metadata = checkpointMetadata(signedCheckpointBytes);
+const witnessEntryHash = checkpointEntryHash(signedCheckpointBytes);
+```
+
+`checkpointMetadata` returns data only after complete checkpoint shape,
+commitment, consistency-proof, and signature verification. The entry hash is
+the RFC 9162 checkpoint entry identity used by witness receipts.
 
 ## Compose with capsule-emit
 

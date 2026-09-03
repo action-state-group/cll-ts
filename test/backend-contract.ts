@@ -39,9 +39,16 @@ export async function backendContract(backend: CllBackend): Promise<void> {
   await expect(backend.scanEntries(-1n, 1)).rejects.toMatchObject({
     code: "invalid",
   } satisfies Partial<CllError>);
+  await expect(
+    backend.scanEntries(BigInt(Number.MAX_SAFE_INTEGER) + 1n, 1),
+  ).rejects.toMatchObject({ code: "invalid" } satisfies Partial<CllError>);
+  await expect(backend.scanEntries(0n, 1.5)).rejects.toMatchObject({
+    code: "invalid",
+  } satisfies Partial<CllError>);
   await expect(backend.getEntry(value(9))).rejects.toMatchObject({
     code: "not_found",
   } satisfies Partial<CllError>);
+  await expect(backend.getWitness("", 0n)).resolves.toBeUndefined();
 
   const runner = new CheckpointRunner(backend, {
     logId: "contract",

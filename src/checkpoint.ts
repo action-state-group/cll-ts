@@ -149,6 +149,14 @@ export function checkpointProjection(input: CheckpointProjectionInput) {
 export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
   validateIdentifier(input.logId);
   if (
+    input.cadence !== undefined &&
+    (!Number.isSafeInteger(input.cadence) || input.cadence < 1)
+  )
+    throw new CllError(
+      "invalid",
+      "checkpoint cadence must be a positive portable integer",
+    );
+  if (
     input.mmrSize <= 0n ||
     input.mmrSize > BigInt(Number.MAX_SAFE_INTEGER) ||
     input.previousSize < 0n ||
@@ -432,6 +440,11 @@ export interface CheckpointMetadata {
   readonly peaks: readonly Uint8Array[];
   readonly previousSize: bigint;
   readonly previousPeaks: readonly Uint8Array[];
+  readonly root: string;
+  readonly previousRoot: string;
+  readonly keyId: string;
+  readonly timestamp: string;
+  readonly cadence?: number;
 }
 
 /** Return linkage metadata only after the complete checkpoint validates. */
@@ -461,12 +474,42 @@ export function checkpointMetadata(
   const cwt = headers.get(15) as Map<number, unknown>;
   const previousSize = BigInt(claims.get("prev_size") as number);
   const previousCommitment = claims.get("prev_commitment") as Uint8Array;
+  const peaks = decodeCommittedPeaks(claims.get("commitment") as Uint8Array);
+  const previousPeaks =
+    previousSize === 0n ? [] : decodeCommittedPeaks(previousCommitment);
   return {
     logId: cwt.get(1) as string,
     size: BigInt(claims.get("log_size") as number),
-    peaks: decodeCommittedPeaks(claims.get("commitment") as Uint8Array),
+    peaks,
     previousSize,
-    previousPeaks:
-      previousSize === 0n ? [] : decodeCommittedPeaks(previousCommitment),
+    previousPeaks,
+    root: Buffer.from(rootFromPeaks(peaks)).toString("hex"),
+    previousRoot:
+      previousSize === 0n
+        ? ""
+        : Buffer.from(rootFromPeaks(previousPeaks)).toString("hex"),
+    keyId: Buffer.from(headers.get(4) as Uint8Array).toString("hex"),
+    timestamp: claims.get("issued_at") as string,
+    ...(claims.has("cadence")
+      ? { cadence: claims.get("cadence") as number }
+      : {}),
   };
+}
+
+/** Return the RFC 9162 checkpoint entry hash after full checkpoint validation. */
+export function checkpointEntryHash(cose: Uint8Array): Uint8Array | undefined {
+  const metadata = checkpointMetadata(cose);
+  if (metadata === undefined) return undefined;
+  const projection = checkpointProjection({
+    logId: metadata.logId,
+    mmrSize: metadata.size,
+    peaks: metadata.peaks,
+    previousSize: metadata.previousSize,
+    previousPeaks: metadata.previousPeaks,
+    keyId: metadata.keyId,
+    timestamp: metadata.timestamp,
+  });
+  return createHash("sha256")
+    .update(createHash("sha256").update(canonicalJson(projection)).digest())
+    .digest();
 }

@@ -1,7 +1,6 @@
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { decode, encode, rfc8949EncodeOptions } from "cborg";
-import { canonicalJson } from "./canonical-json.js";
-import { checkpointProjection, verifyCheckpoint } from "./checkpoint.js";
+import { checkpointEntryHash } from "./checkpoint.js";
 import { limits } from "./types.js";
 import type { WitnessReceipt } from "./witness.js";
 
@@ -65,39 +64,6 @@ function proofRoot(
   return root !== undefined && siblings.length === 0 ? root : undefined;
 }
 
-function checkpointEntry(checkpoint: Uint8Array): Uint8Array | undefined {
-  if (!verifyCheckpoint(checkpoint)) return undefined;
-  const items = decode(checkpoint.subarray(1), {
-    allowIndefinite: false,
-    useMaps: true,
-  }) as unknown[];
-  const headers = decode(items[0] as Uint8Array, {
-    allowIndefinite: false,
-    useMaps: true,
-  }) as Map<number, unknown>;
-  const claims = decode(items[2] as Uint8Array, {
-    allowIndefinite: false,
-    useMaps: true,
-  }) as Map<string, unknown>;
-  const cwt = headers.get(15) as Map<number, unknown>;
-  const peaks = decode(claims.get("commitment") as Uint8Array) as Uint8Array[];
-  const previousCommitment = claims.get("prev_commitment") as Uint8Array;
-  const previousPeaks =
-    previousCommitment.length === 0
-      ? []
-      : (decode(previousCommitment) as Uint8Array[]);
-  const projection = checkpointProjection({
-    logId: cwt.get(1) as string,
-    mmrSize: claims.get("log_size") as number,
-    peaks,
-    previousSize: claims.get("prev_size") as number,
-    previousPeaks,
-    keyId: Buffer.from(headers.get(4) as Uint8Array).toString("hex"),
-    timestamp: claims.get("issued_at") as string,
-  });
-  return sha(sha(canonicalJson(projection)));
-}
-
 /** Offline RFC 9162 receipt verifier under a pinned Ed25519 authority key. */
 export class ReceiptVerifier {
   private readonly publicKey: Uint8Array;
@@ -120,7 +86,7 @@ export class ReceiptVerifier {
         receipt.bytes[0] !== 0xd2
       )
         return false;
-      const entry = checkpointEntry(checkpoint);
+      const entry = checkpointEntryHash(checkpoint);
       if (
         entry === undefined ||
         Buffer.from(entry).toString("hex") !== receipt.entryHash

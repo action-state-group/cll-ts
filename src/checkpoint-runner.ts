@@ -5,7 +5,7 @@ import {
   type SignedCheckpoint,
 } from "./checkpoint.js";
 import { leafCount, MmrTree } from "./mmr.js";
-import { waitForInterval } from "./run-loop.js";
+import { WakeSignal } from "./run-loop.js";
 import {
   CllError,
   limits,
@@ -23,6 +23,7 @@ export interface CheckpointRunnerOptions {
   readonly entryCadence?: number;
   readonly ageCadenceMs?: number;
   readonly pollIntervalMs?: number;
+  readonly scanLimit?: number;
   readonly clock?: () => Date;
 }
 export class CheckpointRunner {
@@ -30,7 +31,9 @@ export class CheckpointRunner {
   private readonly entryCadence: number;
   private readonly ageCadenceMs: number;
   private readonly pollIntervalMs: number;
+  private readonly scanLimit: number;
   private readonly clock: () => Date;
+  private readonly wake = new WakeSignal();
   private tail: Promise<void> = Promise.resolve();
   private running = false;
   public constructor(
@@ -45,18 +48,27 @@ export class CheckpointRunner {
     this.entryCadence = options.entryCadence ?? 100;
     this.ageCadenceMs = options.ageCadenceMs ?? 15 * 60_000;
     this.pollIntervalMs = options.pollIntervalMs ?? 60_000;
+    this.scanLimit = options.scanLimit ?? limits.scanDefault;
     if (
       !Number.isSafeInteger(this.entryCadence) ||
       this.entryCadence < 1 ||
       !Number.isSafeInteger(this.ageCadenceMs) ||
       this.ageCadenceMs < 1 ||
       !Number.isSafeInteger(this.pollIntervalMs) ||
-      this.pollIntervalMs < 1
+      this.pollIntervalMs < 1 ||
+      !Number.isSafeInteger(this.scanLimit) ||
+      this.scanLimit < 1 ||
+      this.scanLimit > limits.scanMax
     )
       throw new TypeError(
-        "runner cadence and poll interval must be positive integers",
+        "runner cadence, poll interval, and scan limit are invalid",
       );
     this.clock = options.clock ?? (() => new Date());
+  }
+
+  /** Wake a running checkpoint loop without blocking the caller. */
+  public notify(): void {
+    this.wake.notify();
   }
 
   /** Run the host-controlled polling lifecycle until its signal is aborted. */
@@ -73,7 +85,7 @@ export class CheckpointRunner {
           if (!(error instanceof CllError) || error.code !== "contention")
             throw error;
         }
-        await waitForInterval(signal, this.pollIntervalMs);
+        await this.wake.wait(signal, this.pollIntervalMs);
       }
     } finally {
       this.running = false;
@@ -165,7 +177,7 @@ export class CheckpointRunner {
     let cursor = current.indexedSeq;
     let firstPendingAt = current.firstPendingAt;
     while (true) {
-      const entries = await this.store.scanEntries(cursor, limits.scanMax);
+      const entries = await this.store.scanEntries(cursor, this.scanLimit);
       if (entries.length === 0) break;
       for (const entry of entries) {
         if (entry.seq !== cursor + 1n)
@@ -176,7 +188,7 @@ export class CheckpointRunner {
         cursor = entry.seq;
         firstPendingAt ??= entry.appendedAt;
       }
-      if (entries.length < limits.scanMax) break;
+      if (entries.length < this.scanLimit) break;
     }
     const checkpointIndexedSeq = current.checkpointIndexedSeq ?? 0n;
     const pendingEntries = cursor - checkpointIndexedSeq;

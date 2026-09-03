@@ -5,7 +5,7 @@ import {
   type WitnessState,
 } from "./types.js";
 import { verifyCheckpoint } from "./checkpoint.js";
-import { waitForInterval } from "./run-loop.js";
+import { WakeSignal } from "./run-loop.js";
 
 export interface WitnessClient {
   readonly id: string;
@@ -25,6 +25,9 @@ export interface WitnessDeliveryRunnerOptions {
   readonly verifiers: ReadonlyMap<string, ReceiptVerification>;
   readonly now?: () => Date;
   readonly pollIntervalMs?: number;
+  readonly baseBackoffMs?: number;
+  readonly maxBackoffMs?: number;
+  readonly jitter?: boolean;
 }
 export class HttpWitnessClient implements WitnessClient {
   private readonly baseUrl: URL;
@@ -32,6 +35,7 @@ export class HttpWitnessClient implements WitnessClient {
     public readonly id: string,
     baseUrl: URL,
     private readonly timeoutMs = 30_000,
+    private readonly maxResponseBytes = limits.receipt,
   ) {
     if (
       (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") ||
@@ -42,6 +46,16 @@ export class HttpWitnessClient implements WitnessClient {
     )
       throw new TypeError(
         "witness base URL must be an HTTP(S) origin without credentials, query, or fragment",
+      );
+    if (
+      !Number.isSafeInteger(this.timeoutMs) ||
+      this.timeoutMs < 1 ||
+      !Number.isSafeInteger(this.maxResponseBytes) ||
+      this.maxResponseBytes < 1 ||
+      this.maxResponseBytes > limits.receipt
+    )
+      throw new TypeError(
+        "witness timeout and response limit must be positive",
       );
     this.baseUrl = new URL(baseUrl);
   }
@@ -70,7 +84,7 @@ export class HttpWitnessClient implements WitnessClient {
         const { done, value } = await reader.read();
         if (done) break;
         length += value.length;
-        if (length > limits.receipt) {
+        if (length > this.maxResponseBytes) {
           await reader.cancel();
           throw new CllError("rejected", "witness response too large");
         }
@@ -147,6 +161,10 @@ export class WitnessDeliveryRunner {
   private readonly verifiers: ReadonlyMap<string, ReceiptVerification>;
   private readonly now: () => Date;
   private readonly pollIntervalMs: number;
+  private readonly baseBackoffMs: number;
+  private readonly maxBackoffMs: number;
+  private readonly jitter: boolean;
+  private readonly wake = new WakeSignal();
   private running = false;
 
   public constructor(
@@ -157,8 +175,25 @@ export class WitnessDeliveryRunner {
     this.verifiers = options.verifiers;
     this.now = options.now ?? (() => new Date());
     this.pollIntervalMs = options.pollIntervalMs ?? 60_000;
-    if (!Number.isSafeInteger(this.pollIntervalMs) || this.pollIntervalMs < 1)
-      throw new TypeError("witness poll interval must be a positive integer");
+    this.baseBackoffMs = options.baseBackoffMs ?? 1_000;
+    this.maxBackoffMs = options.maxBackoffMs ?? 3_600_000;
+    this.jitter = options.jitter ?? false;
+    if (
+      !Number.isSafeInteger(this.pollIntervalMs) ||
+      this.pollIntervalMs < 1 ||
+      !Number.isSafeInteger(this.baseBackoffMs) ||
+      this.baseBackoffMs < 1 ||
+      !Number.isSafeInteger(this.maxBackoffMs) ||
+      this.maxBackoffMs < this.baseBackoffMs
+    )
+      throw new TypeError(
+        "witness polling and backoff configuration is invalid",
+      );
+  }
+
+  /** Wake a running witness-delivery loop without blocking the caller. */
+  public notify(): void {
+    this.wake.notify();
   }
 
   /** Run the host-controlled polling lifecycle until its signal is aborted. */
@@ -175,7 +210,7 @@ export class WitnessDeliveryRunner {
           if (!(error instanceof CllError) || error.code !== "contention")
             throw error;
         }
-        await waitForInterval(signal, this.pollIntervalMs);
+        await this.wake.wait(signal, this.pollIntervalMs);
       }
     } finally {
       this.running = false;
@@ -274,12 +309,22 @@ export class WitnessDeliveryRunner {
         permanent,
         lastError: truncate(String(error)),
         nextAttemptAt: new Date(
-          this.now().valueOf() +
-            Math.min(3_600_000, 1_000 * 2 ** Math.min(item.attempts, 12)),
+          this.now().valueOf() + this.backoff(item.attempts),
         ),
       };
     }
     await this.store.commitWitness(item.attempts, next);
     return completed;
+  }
+
+  private backoff(attempts: number): number {
+    let delay = this.baseBackoffMs;
+    for (
+      let count = 0;
+      count < attempts && delay < this.maxBackoffMs;
+      count += 1
+    )
+      delay = Math.min(delay * 2, this.maxBackoffMs);
+    return this.jitter ? Math.floor(Math.random() * delay) : delay;
   }
 }

@@ -33,6 +33,23 @@ describe("capsule-anchor HTTP client", () => {
     } satisfies Partial<CllError>);
   });
 
+  it("supports a stricter caller-supplied response limit", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response("{}")),
+    );
+    const bounded = new HttpWitnessClient(
+      "anchor",
+      new URL("https://anchor.example"),
+      1_000,
+      1,
+    );
+    await expect(bounded.submit(Uint8Array.of(1))).rejects.toMatchObject({
+      code: "rejected",
+      message: "witness response too large",
+    } satisfies Partial<CllError>);
+  });
+
   it.each([408, 429, 500, 503])(
     "classifies HTTP %i as retryable contention",
     async (status) => {

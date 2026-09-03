@@ -202,6 +202,15 @@ export class MmrTree {
     this.peaks.push(position);
     return BigInt(this.nodes_.length);
   }
+
+  /** Decode and append one canonical lowercase hexadecimal identity. */
+  public appendHexIdentity(identity: string): bigint {
+    if (!/^[0-9a-f]{64}$/u.test(identity))
+      throw new TypeError(
+        "identity must be 64 lowercase hexadecimal characters",
+      );
+    return this.append(Buffer.from(identity, "hex"));
+  }
   public get size(): bigint {
     return BigInt(this.nodes_.length);
   }
@@ -345,6 +354,26 @@ export function verifyInclusionValue(
   }
   return (
     cursor === proof.length && Buffer.from(value).equals(Buffer.from(root))
+  );
+}
+
+/** Verify inclusion of one canonical lowercase hexadecimal identity. */
+export function verifyHexInclusion(
+  root: Uint8Array,
+  mmrSize: bigint,
+  leafIndex: bigint,
+  identity: string,
+  proof: readonly Uint8Array[],
+): boolean {
+  return (
+    /^[0-9a-f]{64}$/u.test(identity) &&
+    verifyInclusionValue(
+      root,
+      mmrSize,
+      leafIndex,
+      Buffer.from(identity, "hex"),
+      proof,
+    )
   );
 }
 

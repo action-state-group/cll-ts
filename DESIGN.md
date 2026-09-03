@@ -43,16 +43,24 @@ file truncates an incomplete final line and rejects a corrupt complete line.
 SQLite stores `cll_meta`, `cll_entries`, `cll_nodes`, and `cll_witnesses` under
 a caller-selected log ID. WAL supports concurrent readers. Writes use
 `BEGIN IMMEDIATE`; an in-process per-file/log queue keeps multiple handles from
-refreshing or committing over each other.
+committing over each other.
 
 MySQL uses the same four logical tables. InnoDB transactions lock the selected
-`cll_meta` row before refreshing state, assigning a sequence, and committing.
-Reads use one repeatable-read transaction so metadata, entries, nodes, and
+`cll_meta` row before assigning a sequence or committing. Reads that reconstruct
+complete CLL state use one repeatable-read transaction so metadata, nodes, and
 witnesses come from one snapshot.
 
-Both SQL backends currently reload and decode every row for the selected log at
-the beginning of each read or write transaction. This is linear in log size and
-prioritizes snapshot correctness over high-throughput access.
+Both SQL backends validate dense entries and complete CLL state at open. Append,
+entry lookup, bounded entry scan, witness lookup, and witness CAS use targeted
+queries. `loadCll` and `commitCll` reconstruct complete CLL state but never load
+record entries. Commits insert only newly appended nodes and witnesses.
+
+The Go and TypeScript libraries align public protocol capabilities rather than
+literal signatures. TypeScript uses promises, exceptions, `bigint`, and
+camelCase; Go uses contexts, returned errors, `uint64`, and exported names. Both
+provide opaque identity append/inclusion, canonical MMR commitments, checkpoint
+metadata and entry-hash inspection, host-wakeable runners, configurable bounded
+scans, and configurable witness retry behavior.
 
 The development schemas that predate the generic v4 contract are not migrated.
 Applications must start a new backend or perform an explicit application-owned

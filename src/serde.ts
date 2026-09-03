@@ -33,11 +33,6 @@ export type WireCllState = {
   witnesses: WireWitness[];
 };
 
-export interface WireState {
-  readonly entries: WireEntry[];
-  readonly cll: WireCllState;
-}
-
 export const entryToWire = (entry: CllEntry): WireEntry => ({
   seq: String(entry.seq),
   value: Buffer.from(entry.value).toString("base64"),
@@ -133,37 +128,3 @@ export const cllFromWire = (wire: WireCllState): CllState => ({
       }),
   witnesses: wire.witnesses.map(witnessFromWire),
 });
-
-export const stateToWire = (
-  entries: readonly CllEntry[],
-  cll: CllState,
-): WireState => ({ entries: entries.map(entryToWire), cll: cllToWire(cll) });
-
-export const stateFromWire = (
-  wire: WireState,
-): { entries: CllEntry[]; cll: CllState } => ({
-  entries: wire.entries.map(entryFromWire),
-  cll: cllFromWire(wire.cll),
-});
-
-export interface DurableStateRows {
-  readonly entries: readonly WireEntry[];
-  readonly cll: WireCllState;
-  readonly nodes: readonly Uint8Array[];
-  readonly witnesses: readonly WireWitness[];
-}
-
-/** Decode relational rows through the same durable-state mapping. */
-export function stateFromRows(rows: DurableStateRows): {
-  entries: CllEntry[];
-  cll: CllState;
-} {
-  const cll = cllFromWire({
-    ...rows.cll,
-    nodes: rows.nodes.map((node) => Buffer.from(node).toString("base64")),
-    witnesses: [...rows.witnesses],
-  });
-  if (cll.size !== BigInt(rows.nodes.length))
-    throw new CllError("corrupt", "stored CLL node count does not match size");
-  return { entries: rows.entries.map(entryFromWire), cll };
-}
