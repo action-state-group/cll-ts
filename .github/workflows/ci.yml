@@ -24,7 +24,7 @@ jobs:
       - name: Check out capsule-emit-ts main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ethanyzhang/capsule-emit-ts
+          repository: action-state-group/capsule-emit-ts
           ref: main
           path: capsule-emit-ts
       - name: Set up Node.js
@@ -62,7 +62,7 @@ jobs:
       - name: Check out capsule-emit-ts main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ethanyzhang/capsule-emit-ts
+          repository: action-state-group/capsule-emit-ts
           ref: main
           path: capsule-emit-ts
       - name: Check out Python reference main
@@ -103,13 +103,13 @@ jobs:
       - name: Check out capsule-emit-ts main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ethanyzhang/capsule-emit-ts
+          repository: action-state-group/capsule-emit-ts
           ref: main
           path: capsule-emit-ts
       - name: Check out cll-go main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ethanyzhang/cll-go
+          repository: action-state-group/cll-go
           ref: main
           path: cll-go
       - name: Check out Python reference main

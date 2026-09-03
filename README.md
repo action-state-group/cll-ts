@@ -15,8 +15,8 @@ Node.js 24 or newer is required. The package is not yet published to npm. Its
 current development dependency points to a sibling `capsule-emit-ts` checkout.
 
 ```sh
-git clone https://github.com/ethanyzhang/capsule-emit-ts.git
-git clone https://github.com/ethanyzhang/cll-ts.git
+git clone https://github.com/action-state-group/capsule-emit-ts.git
+git clone https://github.com/action-state-group/cll-ts.git
 cd capsule-emit-ts && npm ci && npm run build
 cd ../cll-ts && npm ci && npm run build
 ```
