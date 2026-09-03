@@ -118,6 +118,23 @@ const mysql = await MysqlStore.open(process.env.MYSQL_URL!, "example-log");
 - MySQL uses InnoDB transactions and locks the log metadata row while assigning
   sequences or updating checkpoint state.
 
+### SQLite and MySQL tables
+
+`SqliteStore.open()` and `MysqlStore.open()` create the same four
+library-owned tables when they do not already exist:
+
+| Table | Purpose |
+| --- | --- |
+| `cll_meta` | Log-level serialized checkpoint and control state |
+| `cll_entries` | Ordered 32-byte record identities and append timestamps |
+| `cll_nodes` | Merkle Mountain Range nodes used by checkpoints |
+| `cll_witnesses` | Durable witness delivery attempts and receipt state |
+
+Every table is scoped by `log_id`, so one database can hold multiple independent
+logs. The caller must provide an existing database and credentials allowed to
+create and access these tables. They do not contain full application records,
+Capsules, or Producer Envelopes; the application persists those separately.
+
 SQLite and MySQL currently rebuild the selected log's in-memory view from all
 entry, node, and witness rows at the start of each read or write transaction.
 This favors simple snapshot correctness and is linear in stored log size. It is
