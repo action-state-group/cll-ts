@@ -11,6 +11,7 @@ import {
   WitnessDeliveryRunner,
   signCheckpoint,
   verifyCheckpoint,
+  verifyInclusionValue,
   type CllEntry,
   type WitnessClient,
 } from "../src/index.js";
@@ -156,10 +157,22 @@ describe("checkpoint COSE", () => {
       entryCadence: 1,
       clock: () => new Date("2026-09-01T12:34:56Z"),
     });
-    const concurrent = await Promise.all([runner.runOnce(), runner.runOnce()]);
+    // Concurrent runOnce() is guarded only by the backend CAS in commitCll:
+    // exactly one call produces the checkpoint; the other either observes no
+    // pending work or loses the CAS with a contention error (which run()'s loop
+    // swallows). There is no in-process serialization gate.
+    const concurrent = await Promise.allSettled([
+      runner.runOnce(),
+      runner.runOnce(),
+    ]);
     expect(
-      concurrent.filter((checkpoint) => checkpoint !== undefined),
+      concurrent.filter(
+        (result) => result.status === "fulfilled" && result.value !== undefined,
+      ),
     ).toHaveLength(1);
+    for (const result of concurrent)
+      if (result.status === "rejected")
+        expect(result.reason).toMatchObject({ code: "contention" });
     const good: WitnessClient = {
       id: "good",
       submit: async () => ({
@@ -507,6 +520,66 @@ describe("checkpoint COSE", () => {
     expect((await store.getWitness("abort-request", 1n))?.attempts).toBe(0);
     await store.close();
   });
+  it("chains a second checkpoint with a round-trip consistency and inclusion proof", async () => {
+    // Coverage note (interop C1): the cross-impl interop driver only exercises a
+    // FIRST checkpoint (previousSize 0, no consistency proof). This self-test
+    // covers the CheckpointRunner's consistency-proof generation branch and the
+    // MMR inclusion-proof wire, which remain TS self-tested. A true cross-impl
+    // vector for a >=2-checkpoint chain and inclusion proofs would need the Go
+    // and Python drivers extended in their own repositories and is not added
+    // here.
+    const store = new MemoryStore();
+    const identity = createCheckpointIdentity(
+      Buffer.from(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hex",
+      ),
+    );
+    const runner = new CheckpointRunner(store, {
+      logId: "chain-log",
+      identity,
+      entryCadence: 1,
+      clock: () => new Date("2026-09-02T12:00:00Z"),
+    });
+    const valueA = Uint8Array.from({ length: 32 }, () => 0x11);
+    const valueB = Uint8Array.from({ length: 32 }, () => 0x22);
+
+    await store.append({
+      value: valueA,
+      appendedAt: new Date("2026-09-02T11:00:00Z"),
+    });
+    const first = await runner.runOnce();
+    expect(first).toBeDefined();
+    expect(verifyCheckpoint(first!.cose)).toBe(true);
+    expect(checkpointMetadata(first!.cose)?.previousSize).toBe(0n);
+
+    await store.append({
+      value: valueB,
+      appendedAt: new Date("2026-09-02T11:30:00Z"),
+    });
+    const second = await runner.runOnce();
+    expect(second).toBeDefined();
+    // The second checkpoint carries an auto-generated consistency proof that
+    // verifyCheckpoint validates against the first checkpoint's size/root.
+    expect(verifyCheckpoint(second!.cose)).toBe(true);
+    const secondMetadata = checkpointMetadata(second!.cose);
+    expect(secondMetadata?.size).toBe(second!.mmrSize);
+    expect(secondMetadata?.previousSize).toBe(first!.mmrSize);
+    expect(secondMetadata?.previousRoot).toBe(first!.root);
+
+    // Inclusion-proof round-trip against the durable MMR state.
+    const state = await store.loadCll();
+    const tree = new MmrTree(state.nodes);
+    const root = tree.root();
+    for (const [leafIndex, value] of [valueA, valueB].entries()) {
+      const proof = tree.inclusionProof(BigInt(leafIndex));
+      expect(
+        verifyInclusionValue(root, tree.size, BigInt(leafIndex), value, proof),
+      ).toBe(true);
+    }
+    await store.close();
+  });
+
   it("rejects a checkpoint size beyond stored CLL state", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();

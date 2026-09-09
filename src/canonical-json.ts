@@ -9,7 +9,7 @@ function render(value: unknown): string {
     return Object.is(value, -0) ? "0" : String(value);
   }
   if (Array.isArray(value)) return `[${value.map(render).join(",")}]`;
-  if (typeof value !== "object" || value === undefined)
+  if (typeof value !== "object")
     throw new TypeError("unsupported canonical JSON value");
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record)

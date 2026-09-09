@@ -34,7 +34,6 @@ export class CheckpointRunner {
   private readonly scanLimit: number;
   private readonly clock: () => Date;
   private readonly wake = new WakeSignal();
-  private tail: Promise<void> = Promise.resolve();
   private running = false;
   public constructor(
     private readonly store: CheckpointStore,
@@ -91,20 +90,14 @@ export class CheckpointRunner {
       this.running = false;
     }
   }
+  /**
+   * Perform one checkpoint pass. There is no in-process serialization gate:
+   * concurrent `runOnce()` calls are safe for data integrity because the
+   * backend CAS in `commitCll` admits exactly one writer, but a losing
+   * concurrent call may REJECT with a `contention` error. Callers driving this
+   * through `run()` have that error swallowed by its loop.
+   */
   public async runOnce(): Promise<SignedCheckpoint | undefined> {
-    const prior = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await prior;
-    try {
-      return await this.runOnceLocked();
-    } finally {
-      release();
-    }
-  }
-  private async runOnceLocked(): Promise<SignedCheckpoint | undefined> {
     const now = this.clock();
     const current = await this.store.loadCll();
     if (

@@ -39,8 +39,17 @@ interface MysqlEntryRow {
 
 /** MySQL 8 backend with one log-scoped metadata row lock per write. */
 export class MysqlStore implements CllBackend {
-  private queue: Promise<void> = Promise.resolve();
   private closed = false;
+
+  // Close/in-flight contract: every backend operation registers its promise in
+  // `inFlight` synchronously (before its first await, right after ensureOpen)
+  // and removes it on settle. `close()` flips `closed` so no new operation is
+  // admitted, then awaits the operations already registered before ending the
+  // pool. This prevents mysql2 from rejecting a queued connection acquisition
+  // when the pool is torn down under an operation that already passed
+  // ensureOpen. It is not a serialization gate: registered operations still run
+  // concurrently, so reads do not block one another.
+  private readonly inFlight = new Set<Promise<unknown>>();
 
   private constructor(
     private readonly pool: Pool,
@@ -52,6 +61,8 @@ export class MysqlStore implements CllBackend {
     logId = "default",
   ): Promise<MysqlStore> {
     validateIdentifier(logId);
+    // mysql2 declares createPool with two non-union overloads (string and
+    // PoolOptions); the branches narrow the union so a single overload matches.
     const pool =
       typeof options === "string"
         ? mysql.createPool(options)
@@ -102,7 +113,7 @@ export class MysqlStore implements CllBackend {
         [logId, JSON.stringify(empty)],
       );
       const backend = new MysqlStore(pool, logId);
-      await backend.serialized(() => backend.validateSnapshot());
+      await backend.validateSnapshot();
       return backend;
     } catch (error) {
       await pool.end();
@@ -112,21 +123,6 @@ export class MysqlStore implements CllBackend {
 
   private ensureOpen(): void {
     if (this.closed) throw new CllError("closed", "backend is closed");
-  }
-
-  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
-    const prior = this.queue;
-    let release!: () => void;
-    this.queue = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await prior;
-    try {
-      this.ensureOpen();
-      return await operation();
-    } finally {
-      release();
-    }
   }
 
   private async withConnection<T>(
@@ -151,20 +147,42 @@ export class MysqlStore implements CllBackend {
     }
   }
 
+  /**
+   * Run an operation while tracking it for `close()`. `ensureOpen()` and the
+   * synchronous registration happen before the operation's first await, so a
+   * concurrent `close()` either rejects the operation up front (already closed)
+   * or observes it in `inFlight` and waits for it. Removal on settle keeps the
+   * set bounded.
+   */
+  private async track<T>(start: () => Promise<T>): Promise<T> {
+    // No await precedes registration: `ensureOpen()` and `inFlight.add` run
+    // synchronously when this async function is called, so a concurrent
+    // `close()` cannot slip in before the operation is tracked. `async` here
+    // only turns an ensureOpen() rejection into a rejected promise.
+    this.ensureOpen();
+    const promise = start();
+    this.inFlight.add(promise);
+    const cleanup = (): void => {
+      this.inFlight.delete(promise);
+    };
+    void promise.then(cleanup, cleanup);
+    return promise;
+  }
+
   private read<T>(operation: (query: Pool) => Promise<T>): Promise<T> {
-    return this.serialized(() => operation(this.pool));
+    return this.track(() => operation(this.pool));
   }
 
   private readSnapshot<T>(
     operation: (connection: PoolConnection) => Promise<T>,
   ): Promise<T> {
-    return this.serialized(() => this.withConnection(true, operation));
+    return this.track(() => this.withConnection(true, operation));
   }
 
   private write<T>(
     operation: (connection: PoolConnection) => Promise<T>,
   ): Promise<T> {
-    return this.serialized(() =>
+    return this.track(() =>
       this.withConnection(false, async (connection) => {
         const [metadata] = await connection.execute(
           "SELECT state FROM cll_meta WHERE log_id=? FOR UPDATE",
@@ -386,39 +404,50 @@ export class MysqlStore implements CllBackend {
     expectedAttempts: number,
     next: WitnessState,
   ): Promise<void> {
-    return this.write(async (connection) => {
-      const [rows] = await connection.execute(
-        "SELECT witness_id AS witnessId,checkpoint_size AS checkpointSize,attempts,witness FROM cll_witnesses WHERE log_id=? AND witness_id=? AND checkpoint_size=?",
-        [this.logId, next.witnessId, String(next.checkpointSize)],
-      );
-      const row = (rows as SqlWitnessRow[])[0];
-      if (row === undefined)
-        throw new CllError("contention", "witness state changed");
-      const updated = applyWitness(
-        witnessFromSqlRow(row),
-        expectedAttempts,
-        next,
-      );
-      const [result] = await connection.execute(
-        "UPDATE cll_witnesses SET attempts=?,witness=? WHERE log_id=? AND witness_id=? AND checkpoint_size=? AND attempts=?",
-        [
-          updated.attempts,
-          JSON.stringify(witnessToWire(updated)),
-          this.logId,
-          updated.witnessId,
-          String(updated.checkpointSize),
+    // Witness commits touch only their own cll_witnesses row and rely on the
+    // attempts CAS below, so they take their own transaction WITHOUT the
+    // cll_meta FOR UPDATE lock that append/commitCll use. This keeps different
+    // witnesses (distinct witness_id) from serializing on the shared meta row.
+    return this.track(() =>
+      this.withConnection(false, async (connection) => {
+        const [rows] = await connection.execute(
+          "SELECT witness_id AS witnessId,checkpoint_size AS checkpointSize,attempts,witness FROM cll_witnesses WHERE log_id=? AND witness_id=? AND checkpoint_size=?",
+          [this.logId, next.witnessId, String(next.checkpointSize)],
+        );
+        const row = (rows as SqlWitnessRow[])[0];
+        if (row === undefined)
+          throw new CllError("contention", "witness state changed");
+        const updated = applyWitness(
+          witnessFromSqlRow(row),
           expectedAttempts,
-        ],
-      );
-      if ((result as { affectedRows: number }).affectedRows !== 1)
-        throw new CllError("contention", "witness CAS failed");
-    });
+          next,
+        );
+        const [result] = await connection.execute(
+          "UPDATE cll_witnesses SET attempts=?,witness=? WHERE log_id=? AND witness_id=? AND checkpoint_size=? AND attempts=?",
+          [
+            updated.attempts,
+            JSON.stringify(witnessToWire(updated)),
+            this.logId,
+            updated.witnessId,
+            String(updated.checkpointSize),
+            expectedAttempts,
+          ],
+        );
+        if ((result as { affectedRows: number }).affectedRows !== 1)
+          throw new CllError("contention", "witness CAS failed");
+      }),
+    );
   }
 
   public async close(): Promise<void> {
     if (this.closed) return;
-    await this.queue;
+    // Admit no new operations, then drain the ones already registered (they may
+    // still be awaiting a pooled connection) before ending the pool, so mysql2
+    // does not reject their queued acquisition during teardown.
     this.closed = true;
+    // allSettled snapshots the iterable synchronously, so operations that
+    // remove themselves on settle cannot escape this drain.
+    await Promise.allSettled(this.inFlight);
     await this.pool.end();
   }
 }
