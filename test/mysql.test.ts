@@ -152,6 +152,21 @@ describe("MySQL backend", () => {
     expect(secondResult.status).toBe("fulfilled");
   }, 60_000);
 
+  it("shares one drain across concurrent close calls", async () => {
+    // Every close() caller must await the same drain-then-end sequence; a second
+    // concurrent call must not resolve early while the pool is still closing.
+    const store = await MysqlStore.open(
+      { uri: container.getConnectionUri(), connectionLimit: 1 },
+      "close-shared",
+    );
+    const first = store.close();
+    const second = store.close();
+    expect(second).toBe(first);
+    await expect(Promise.all([first, second])).resolves.toBeDefined();
+    // A later close() after completion is still idempotent and resolved.
+    await expect(store.close()).resolves.toBeUndefined();
+  }, 60_000);
+
   it("rejects an entry sequence gap when reopened", async () => {
     const backend = await MysqlStore.open(
       container.getConnectionUri(),

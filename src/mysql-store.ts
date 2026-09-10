@@ -40,6 +40,7 @@ interface MysqlEntryRow {
 /** MySQL 8 backend with one log-scoped metadata row lock per write. */
 export class MysqlStore implements CllBackend {
   private closed = false;
+  private closing: Promise<void> | undefined;
 
   // Close/in-flight contract: every backend operation registers its promise in
   // `inFlight` synchronously (before its first await, right after ensureOpen)
@@ -439,15 +440,23 @@ export class MysqlStore implements CllBackend {
     );
   }
 
-  public async close(): Promise<void> {
-    if (this.closed) return;
-    // Admit no new operations, then drain the ones already registered (they may
-    // still be awaiting a pooled connection) before ending the pool, so mysql2
-    // does not reject their queued acquisition during teardown.
-    this.closed = true;
-    // allSettled snapshots the iterable synchronously, so operations that
-    // remove themselves on settle cannot escape this drain.
-    await Promise.allSettled(this.inFlight);
-    await this.pool.end();
+  public close(): Promise<void> {
+    // Idempotent and safe under concurrent calls: the first call admits no new
+    // operations and starts a single drain-then-end sequence; every caller
+    // awaits that same promise, so no caller returns before the pool is
+    // actually closed.
+    if (this.closing === undefined) {
+      // Admit no new operations, then drain the ones already registered (they
+      // may still be awaiting a pooled connection) before ending the pool, so
+      // mysql2 does not reject their queued acquisition during teardown.
+      this.closed = true;
+      this.closing = (async (): Promise<void> => {
+        // allSettled snapshots the iterable synchronously, so operations that
+        // remove themselves on settle cannot escape this drain.
+        await Promise.allSettled(this.inFlight);
+        await this.pool.end();
+      })();
+    }
+    return this.closing;
   }
 }
