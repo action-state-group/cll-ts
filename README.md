@@ -7,7 +7,7 @@ records whose identities are appended.
 
 ## Install
 
-Node.js 24 or newer is required.
+Node.js 22 or newer is required.
 
 ```sh
 npm install @action-state-group/cll

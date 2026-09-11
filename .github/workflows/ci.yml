@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run format:check
@@ -41,7 +41,7 @@ jobs:
           path: checkpointed-local-log
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
           cache-dependency-path: cll-ts/package-lock.json
       - run: npm ci
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npx vitest run test/mysql.test.ts
@@ -82,7 +82,7 @@ jobs:
           path: checkpointed-local-log
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
           cache-dependency-path: cll-ts/package-lock.json
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v5
@@ -115,7 +115,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
       - run: npm ci && npm run build
       - name: Install packed artifact and import every entry point
