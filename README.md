@@ -170,9 +170,9 @@ import {
 
 const tree = new MmrTree();
 const identity = "ab".repeat(32);
-tree.appendHexIdentity(identity);
-const proof = tree.inclusionProof(0n);
-verifyHexInclusion(tree.root(), tree.size, 0n, identity, proof);
+await tree.appendHexIdentity(identity);
+const proof = await tree.inclusionProof(0n);
+await verifyHexInclusion(await tree.root(), tree.size, 0n, identity, proof);
 
 const metadata = checkpointMetadata(signedCheckpointBytes);
 const witnessEntryHash = checkpointEntryHash(signedCheckpointBytes);

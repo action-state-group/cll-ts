@@ -1,22 +1,8 @@
-import { createHash } from "node:crypto";
 import { encode, rfc8949EncodeOptions } from "cborg";
 
-interface NodeMeta {
-  readonly height: number;
-  readonly left?: number;
-  readonly right?: number;
-  parent?: number;
-}
-interface PeakMeta {
-  readonly leafStart: number;
-  readonly leaves: number;
-  readonly nodeStart: number;
-  readonly position: number;
-}
-interface PathStep {
-  readonly parent: number;
-  readonly isLeft: boolean;
-}
+export type MmrHash = (...parts: readonly Uint8Array[]) => Promise<Uint8Array>;
+
+type Meta = { height: number; left?: number; right?: number; parent?: number };
 export interface MmrConsistencyProof {
   readonly oldSize: bigint;
   readonly newSize: bigint;
@@ -24,231 +10,215 @@ export interface MmrConsistencyProof {
   readonly witness: readonly (readonly Uint8Array[])[];
   readonly newPeaks: readonly Uint8Array[];
 }
-const sha = (...parts: readonly Uint8Array[]): Uint8Array =>
-  createHash("sha256").update(Buffer.concat(parts)).digest();
-const be64 = (value: bigint): Uint8Array => {
-  const bytes = Buffer.alloc(8);
-  bytes.writeBigUInt64BE(value);
-  return bytes;
+export interface MmrInclusionProof {
+  readonly v: 1;
+  readonly kind: "inclusion";
+  readonly size: number;
+  readonly leaf_index: number;
+  readonly witness: readonly string[];
+  readonly peaks_left: readonly string[];
+  readonly peaks_right: readonly string[];
+}
+export interface MmrStructuredConsistencyProof {
+  readonly v: 1;
+  readonly kind: "consistency";
+  readonly size_a: number;
+  readonly size_b: number;
+  readonly old_peaks: readonly string[];
+  readonly witness: readonly (readonly string[])[];
+  readonly new_peaks: readonly string[];
+}
+const ok = (x: Uint8Array): boolean => x.length === 32;
+const same = (a: Uint8Array, b: Uint8Array): boolean =>
+  a.length === b.length && a.every((x, i) => x === b[i]);
+const be64 = (n: bigint): Uint8Array => {
+  const x = new Uint8Array(8);
+  new DataView(x.buffer).setBigUint64(0, n);
+  return x;
 };
-const parentHash = (
-  left: Uint8Array,
-  right: Uint8Array,
-  position: number,
-): Uint8Array => sha(be64(BigInt(position + 1)), left, right);
-const bag = (right: Uint8Array, left: Uint8Array): Uint8Array =>
-  sha(right, left);
-const validHash = (value: Uint8Array): boolean => value.length === 32;
-
-function topology(leaves: number): {
-  meta: NodeMeta[];
+const parent = (
+  hash: MmrHash,
+  l: Uint8Array,
+  r: Uint8Array,
+  p: number,
+): Promise<Uint8Array> => hash(be64(BigInt(p + 1)), l, r);
+const toHex = (x: Uint8Array): string =>
+  Array.from(x, (b) => b.toString(16).padStart(2, "0")).join("");
+const hex = (x: string): Uint8Array | undefined =>
+  /^[0-9a-f]{64}$/u.test(x)
+    ? Uint8Array.from(x.match(/../gu)!, (b) => Number.parseInt(b, 16))
+    : undefined;
+function shape(leaves: number): {
+  meta: Meta[];
   peaks: number[];
-  leafPositions: number[];
+  leaves: number[];
 } {
-  const meta: NodeMeta[] = [];
-  const peaks: number[] = [];
-  const leafPositions: number[] = [];
-  for (let leaf = 0; leaf < leaves; leaf += 1) {
-    let position = meta.length;
+  const meta: Meta[] = [],
+    peaks: number[] = [],
+    positions: number[] = [];
+  for (let i = 0; i < leaves; i += 1) {
+    let p = meta.length;
     meta.push({ height: 0 });
-    leafPositions.push(position);
-    while (
-      peaks.length !== 0 &&
-      meta[peaks.at(-1)!]!.height === meta[position]!.height
-    ) {
-      const left = peaks.pop()!;
-      const parent = meta.length;
-      meta.push({ height: meta[position]!.height + 1, left, right: position });
-      meta[left]!.parent = parent;
-      meta[position]!.parent = parent;
-      position = parent;
+    positions.push(p);
+    while (peaks.length && meta[peaks.at(-1)!]!.height === meta[p]!.height) {
+      const l = peaks.pop()!,
+        q = meta.length;
+      meta.push({ height: meta[p]!.height + 1, left: l, right: p });
+      meta[l]!.parent = q;
+      meta[p]!.parent = q;
+      p = q;
     }
-    peaks.push(position);
+    peaks.push(p);
   }
-  return { meta, peaks, leafPositions };
+  return { meta, peaks, leaves: positions };
 }
-
-/** Describe the perfect-tree mountains in left-to-right MMR peak order. */
-function peakLayout(leaves: bigint): PeakMeta[] {
-  const peaks: PeakMeta[] = [];
-  let remaining = leaves;
-  let leafStart = 0n;
-  let nodeStart = 0n;
-  while (remaining > 0n) {
-    let mountainLeaves = 1n;
-    while (mountainLeaves << 1n <= remaining) mountainLeaves <<= 1n;
-    const nodeCount = 2n * mountainLeaves - 1n;
-    peaks.push({
-      leafStart: Number(leafStart),
-      leaves: Number(mountainLeaves),
-      nodeStart: Number(nodeStart),
-      position: Number(nodeStart + nodeCount - 1n),
-    });
-    remaining -= mountainLeaves;
-    leafStart += mountainLeaves;
-    nodeStart += nodeCount;
+function path(
+  s: ReturnType<typeof shape>,
+  nodes: readonly Uint8Array[],
+  start: number,
+): Uint8Array[] {
+  const r: Uint8Array[] = [];
+  let p = start;
+  while (s.meta[p]!.parent !== undefined) {
+    const q = s.meta[p]!.parent!,
+      m = s.meta[q]!;
+    r.push(Uint8Array.from(nodes[m.left === p ? m.right! : m.left!]!));
+    p = q;
   }
-  return peaks;
+  return r;
 }
-
-/** Return the bottom-up path from an aligned perfect subtree to its peak. */
-function pathToPeak(
-  peak: PeakMeta,
-  targetLeafStart: number,
-  targetLeaves: number,
-): PathStep[] | undefined {
-  if (
-    targetLeaves < 1 ||
-    targetLeafStart < peak.leafStart ||
-    targetLeafStart + targetLeaves > peak.leafStart + peak.leaves
-  )
-    return undefined;
-  let relativeStart = targetLeafStart - peak.leafStart;
-  let subtreeLeaves = peak.leaves;
-  let nodeStart = peak.nodeStart;
-  const topDown: PathStep[] = [];
-  while (subtreeLeaves !== targetLeaves) {
-    const half = subtreeLeaves / 2;
-    if (targetLeaves > half) return undefined;
-    const childNodes = 2 * half - 1;
-    const parent = nodeStart + 2 * subtreeLeaves - 2;
-    if (relativeStart < half) {
-      if (relativeStart + targetLeaves > half) return undefined;
-      topDown.push({ parent, isLeft: true });
-    } else {
-      relativeStart -= half;
-      nodeStart += childNodes;
-      topDown.push({ parent, isLeft: false });
-    }
-    subtreeLeaves = half;
+export function leafCount(size: bigint): bigint | undefined {
+  if (size < 0n || size > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
+  const count = (n: bigint) =>
+    2n * n - BigInt(n.toString(2).replaceAll("0", "").length);
+  let lo = 0n,
+    hi = size + 1n;
+  while (lo <= hi) {
+    const n = (lo + hi) >> 1n,
+      c = count(n);
+    if (c === size) return n;
+    if (c < size) lo = n + 1n;
+    else hi = n - 1n;
   }
-  if (relativeStart !== 0) return undefined;
-  return topDown.reverse();
+  return undefined;
 }
-
-export function rootFromPeaks(peaks: readonly Uint8Array[]): Uint8Array {
-  if (peaks.length === 0) return new Uint8Array(32);
+export async function rootFromPeaks(
+  hash: MmrHash,
+  peaks: readonly Uint8Array[],
+): Promise<Uint8Array> {
+  if (!peaks.length) return new Uint8Array(32);
   let root: Uint8Array = Uint8Array.from(peaks.at(-1)!);
-  for (let index = peaks.length - 2; index >= 0; index -= 1)
-    root = bag(root, peaks[index]!);
+  for (let i = peaks.length - 2; i >= 0; i -= 1)
+    root = await hash(root, peaks[i]!);
   return root;
 }
-
-/** Encode the complete MMR accumulator as the CLL 0.1.0 commitment object. */
 export function commitmentObject(peaks: readonly Uint8Array[]): Uint8Array {
-  if (peaks.some((peak) => !validHash(peak)))
+  if (peaks.some((x) => !ok(x)))
     throw new TypeError("MMR peaks must be 32 bytes");
   return encode(peaks, rfc8949EncodeOptions);
 }
-
 export class MmrTree {
   private readonly nodes_: Uint8Array[] = [];
-  private readonly meta: NodeMeta[] = [];
+  private readonly meta: Meta[] = [];
   private readonly peaks: number[] = [];
   private readonly leafPositions: number[] = [];
-  public constructor(nodes: readonly Uint8Array[] = []) {
-    if (nodes.length !== 0) {
-      const leaves = leafCount(BigInt(nodes.length));
-      if (leaves === undefined)
-        throw new TypeError("invalid complete MMR size");
-      const shape = topology(Number(leaves));
-      for (const item of shape.meta) this.meta.push(item);
-      for (const item of shape.peaks) this.peaks.push(item);
-      for (const item of shape.leafPositions) this.leafPositions.push(item);
-      if (nodes.some((node) => !validHash(node)))
-        throw new TypeError("MMR nodes must be 32 bytes");
-      for (const item of nodes) this.nodes_.push(Uint8Array.from(item));
-      for (let position = 0; position < this.meta.length; position += 1) {
-        const node = this.meta[position]!;
-        if (node.left === undefined || node.right === undefined) continue;
-        const expected = parentHash(
-          this.nodes_[node.left]!,
-          this.nodes_[node.right]!,
-          position,
+  private readonly ready: Promise<void>;
+  public constructor(
+    private readonly hash: MmrHash,
+    nodes: readonly Uint8Array[] = [],
+  ) {
+    const leaves = leafCount(BigInt(nodes.length));
+    if (leaves === undefined || nodes.some((x) => !ok(x)))
+      throw new TypeError("invalid complete MMR nodes");
+    const s = shape(Number(leaves));
+    this.meta.push(...s.meta);
+    this.peaks.push(...s.peaks);
+    this.leafPositions.push(...s.leaves);
+    this.nodes_.push(...nodes.map((node) => Uint8Array.from(node)));
+    this.ready = this.validate();
+  }
+  private async validate(): Promise<void> {
+    for (let position = 0; position < this.meta.length; position += 1) {
+      const node = this.meta[position]!;
+      if (node.left === undefined || node.right === undefined) continue;
+      const expected = await parent(
+        this.hash,
+        this.nodes_[node.left]!,
+        this.nodes_[node.right]!,
+        position,
+      );
+      if (!same(expected, this.nodes_[position]!))
+        throw new TypeError(
+          `MMR interior node ${position} does not match its children`,
         );
-        if (!Buffer.from(expected).equals(Buffer.from(this.nodes_[position]!)))
-          throw new TypeError(
-            `MMR interior node ${position} does not match its children`,
-          );
-      }
     }
-  }
-  /** Commit an application-neutral 32-byte record identity as the next CLL leaf. */
-  public append(value: Uint8Array): bigint {
-    if (value.length !== 32)
-      throw new TypeError("CLL leaf value must be exactly 32 bytes");
-    let position = this.nodes_.length;
-    this.nodes_.push(sha(Uint8Array.of(0), value));
-    this.meta.push({ height: 0 });
-    this.leafPositions.push(position);
-    while (
-      this.peaks.length !== 0 &&
-      this.meta[this.peaks.at(-1)!]!.height === this.meta[position]!.height
-    ) {
-      const left = this.peaks.pop()!;
-      const parent = this.nodes_.length;
-      this.nodes_.push(
-        parentHash(this.nodes_[left]!, this.nodes_[position]!, parent),
-      );
-      this.meta.push({
-        height: this.meta[position]!.height + 1,
-        left,
-        right: position,
-      });
-      this.meta[left]!.parent = parent;
-      this.meta[position]!.parent = parent;
-      position = parent;
-    }
-    this.peaks.push(position);
-    return BigInt(this.nodes_.length);
-  }
-
-  /** Decode and append one canonical lowercase hexadecimal identity. */
-  public appendHexIdentity(identity: string): bigint {
-    if (!/^[0-9a-f]{64}$/u.test(identity))
-      throw new TypeError(
-        "identity must be 64 lowercase hexadecimal characters",
-      );
-    return this.append(Buffer.from(identity, "hex"));
   }
   public get size(): bigint {
     return BigInt(this.nodes_.length);
   }
   public nodes(): readonly Uint8Array[] {
-    return this.nodes_.map((item) => Uint8Array.from(item));
-  }
-  public root(): Uint8Array {
-    return rootFromPeaks(this.peaks.map((position) => this.nodes_[position]!));
+    return this.nodes_.map((node) => Uint8Array.from(node));
   }
   public peakHashes(): readonly Uint8Array[] {
-    return this.peaks.map((position) =>
-      Uint8Array.from(this.nodes_[position]!),
-    );
+    return this.peaks.map((p) => Uint8Array.from(this.nodes_[p]!));
   }
-  public peakHashesAt(size: bigint): readonly Uint8Array[] {
+  public async peakHashesAt(size: bigint): Promise<readonly Uint8Array[]> {
+    await this.ready;
     const leaves = leafCount(size);
     if (leaves === undefined || size > this.size)
       throw new RangeError("invalid historical MMR size");
-    return topology(Number(leaves)).peaks.map((position) =>
+    return shape(Number(leaves)).peaks.map((position) =>
       Uint8Array.from(this.nodes_[position]!),
     );
   }
   private siblingPath(start: number): Uint8Array[] {
-    const path: Uint8Array[] = [];
-    let position = start;
-    while (this.meta[position]!.parent !== undefined) {
-      const parent = this.meta[position]!.parent!;
-      const item = this.meta[parent]!;
-      path.push(
-        Uint8Array.from(
-          this.nodes_[item.left === position ? item.right! : item.left!]!,
-        ),
-      );
-      position = parent;
-    }
-    return path;
+    return path(
+      { meta: this.meta, peaks: this.peaks, leaves: this.leafPositions },
+      this.nodes_,
+      start,
+    );
   }
-  public inclusionProof(leafIndex: bigint): readonly Uint8Array[] {
+  public async append(value: Uint8Array): Promise<bigint> {
+    await this.ready;
+    if (!ok(value))
+      throw new TypeError("CLL leaf value must be exactly 32 bytes");
+    let p = this.nodes_.length;
+    this.nodes_.push(await this.hash(Uint8Array.of(0), value));
+    this.meta.push({ height: 0 });
+    this.leafPositions.push(p);
+    while (
+      this.peaks.length &&
+      this.meta[this.peaks.at(-1)!]!.height === this.meta[p]!.height
+    ) {
+      const l = this.peaks.pop()!,
+        q = this.nodes_.length;
+      this.nodes_.push(
+        await parent(this.hash, this.nodes_[l]!, this.nodes_[p]!, q),
+      );
+      this.meta.push({ height: this.meta[p]!.height + 1, left: l, right: p });
+      this.meta[l]!.parent = q;
+      this.meta[p]!.parent = q;
+      p = q;
+    }
+    this.peaks.push(p);
+    return this.size;
+  }
+  public async appendHexIdentity(identity: string): Promise<bigint> {
+    const value = hex(identity);
+    if (!value)
+      throw new TypeError(
+        "identity must be 64 lowercase hexadecimal characters",
+      );
+    return this.append(value);
+  }
+  public async root(): Promise<Uint8Array> {
+    await this.ready;
+    return rootFromPeaks(this.hash, this.peakHashes());
+  }
+  public async inclusionProof(
+    leafIndex: bigint,
+  ): Promise<readonly Uint8Array[]> {
+    await this.ready;
     const leaf = this.leafPositions[Number(leafIndex)];
     if (leaf === undefined) throw new RangeError("leaf index out of range");
     const proof = this.siblingPath(leaf);
@@ -259,179 +229,179 @@ export class MmrTree {
     const right = this.peaks
       .slice(peakIndex + 1)
       .map((item) => this.nodes_[item]!);
-    if (right.length !== 0) proof.push(rootFromPeaks(right));
+    if (right.length !== 0) proof.push(await rootFromPeaks(this.hash, right));
     for (let index = peakIndex - 1; index >= 0; index -= 1)
       proof.push(Uint8Array.from(this.nodes_[this.peaks[index]!]!));
     return proof;
   }
-  public consistencyProof(oldSize: bigint): MmrConsistencyProof {
+  public async consistencyProof(oldSize: bigint): Promise<MmrConsistencyProof> {
+    await this.ready;
     const oldLeaves = leafCount(oldSize);
     if (oldLeaves === undefined || oldSize <= 0n || oldSize > this.size)
       throw new RangeError("invalid previous MMR size");
-    const oldShape = topology(Number(oldLeaves));
-    const witness = oldShape.peaks.map((oldPeak) => {
-      return this.siblingPath(oldPeak);
-    });
+    const oldShape = shape(Number(oldLeaves));
     return {
       oldSize,
       newSize: this.size,
       oldPeaks: oldShape.peaks.map((position) =>
         Uint8Array.from(this.nodes_[position]!),
       ),
-      witness,
+      witness: oldShape.peaks.map((oldPeak) => this.siblingPath(oldPeak)),
       newPeaks: this.peakHashes(),
     };
   }
 }
-
-export function leafCount(size: bigint): bigint | undefined {
-  if (size < 0n || size > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
-  const nodesFor = (leaves: bigint): bigint => {
-    let value = leaves;
-    let peaks = 0n;
-    while (value !== 0n) {
-      peaks += value & 1n;
-      value >>= 1n;
-    }
-    return 2n * leaves - peaks;
-  };
-  let low = 0n;
-  let high = size + 1n;
-  while (low <= high) {
-    const middle = (low + high) >> 1n;
-    const candidate = nodesFor(middle);
-    if (candidate === size) return middle;
-    if (candidate < size) low = middle + 1n;
-    else high = middle - 1n;
-  }
-  return undefined;
-}
-
-export function verifyInclusionValue(
-  root: Uint8Array,
-  mmrSize: bigint,
+export async function inclusionProof(
+  tree: MmrTree,
   leafIndex: bigint,
-  entryValue: Uint8Array,
-  proof: readonly Uint8Array[],
-): boolean {
-  const leaves = leafCount(mmrSize);
+  size: bigint = tree.size,
+): Promise<MmrInclusionProof> {
+  const leaves = leafCount(size);
   if (
-    !validHash(root) ||
+    leaves === undefined ||
+    size > tree.size ||
+    leafIndex < 0n ||
+    leafIndex >= leaves
+  )
+    throw new RangeError("invalid MMR inclusion proof request");
+  const s = shape(Number(leaves)),
+    leaf = s.leaves[Number(leafIndex)]!;
+  let p = leaf;
+  while (s.meta[p]!.parent !== undefined) p = s.meta[p]!.parent!;
+  const peak = s.peaks.indexOf(p),
+    nodes = tree.nodes();
+  return {
+    v: 1,
+    kind: "inclusion",
+    size: Number(size),
+    leaf_index: Number(leafIndex),
+    witness: path(s, nodes, leaf).map(toHex),
+    peaks_left: s.peaks.slice(0, peak).map((x) => toHex(nodes[x]!)),
+    peaks_right: s.peaks.slice(peak + 1).map((x) => toHex(nodes[x]!)),
+  };
+}
+export async function consistencyProof(
+  tree: MmrTree,
+  sizeA: bigint,
+  sizeB: bigint = tree.size,
+): Promise<MmrStructuredConsistencyProof> {
+  const a = leafCount(sizeA),
+    b = leafCount(sizeB);
+  if (a === undefined || b === undefined || sizeB < sizeA || sizeB > tree.size)
+    throw new RangeError("invalid MMR consistency proof request");
+  const old = shape(Number(a)),
+    next = shape(Number(b)),
+    nodes = tree.nodes();
+  return {
+    v: 1,
+    kind: "consistency",
+    size_a: Number(sizeA),
+    size_b: Number(sizeB),
+    old_peaks: old.peaks.map((x) => toHex(nodes[x]!)),
+    witness: old.peaks.map((x) => path(next, nodes, x).map(toHex)),
+    new_peaks: next.peaks.map((x) => toHex(nodes[x]!)),
+  };
+}
+export async function verifyInclusionValue(
+  hash: MmrHash,
+  root: Uint8Array,
+  size: bigint,
+  leafIndex: bigint,
+  value: Uint8Array,
+  proof: readonly Uint8Array[],
+): Promise<boolean> {
+  const leaves = leafCount(size);
+  if (
+    !ok(root) ||
+    !ok(value) ||
     leaves === undefined ||
     leafIndex < 0n ||
     leafIndex >= leaves ||
-    entryValue.length !== 32 ||
-    proof.some((item) => !validHash(item))
+    proof.some((x) => !ok(x))
   )
     return false;
-  const layout = peakLayout(leaves);
-  const peakIndex = layout.findIndex(
-    (peak) =>
-      Number(leafIndex) >= peak.leafStart &&
-      Number(leafIndex) < peak.leafStart + peak.leaves,
-  );
-  if (peakIndex < 0) return false;
-  const path = pathToPeak(layout[peakIndex]!, Number(leafIndex), 1);
-  if (path === undefined) return false;
-  let value = sha(Uint8Array.of(0), entryValue);
-  let cursor = 0;
-  for (const step of path) {
-    const sibling = proof[cursor++];
-    if (sibling === undefined) return false;
-    value = step.isLeft
-      ? parentHash(value, sibling, step.parent)
-      : parentHash(sibling, value, step.parent);
+  const s = shape(Number(leaves)),
+    leaf = s.leaves[Number(leafIndex)]!;
+  let p = leaf,
+    v = await hash(Uint8Array.of(0), value),
+    i = 0;
+  while (s.meta[p]!.parent !== undefined) {
+    const q = s.meta[p]!.parent!,
+      m = s.meta[q]!,
+      x = proof[i++];
+    if (!x) return false;
+    v =
+      m.left === p ? await parent(hash, v, x, q) : await parent(hash, x, v, q);
+    p = q;
   }
-  if (peakIndex < layout.length - 1) {
-    const right = proof[cursor++];
-    if (right === undefined) return false;
-    value = bag(right, value);
+  const peak = s.peaks.indexOf(p);
+  if (peak < s.peaks.length - 1) {
+    const right = proof[i++];
+    if (!right) return false;
+    v = await hash(right, v);
   }
-  for (let index = peakIndex - 1; index >= 0; index -= 1) {
-    const left = proof[cursor++];
-    if (left === undefined) return false;
-    value = bag(value, left);
+  for (let left = peak - 1; left >= 0; left -= 1) {
+    const item = proof[i++];
+    if (!item) return false;
+    v = await hash(v, item);
   }
-  return (
-    cursor === proof.length && Buffer.from(value).equals(Buffer.from(root))
-  );
+  return i === proof.length && same(v, root);
 }
-
-/** Verify inclusion of one canonical lowercase hexadecimal identity. */
-export function verifyHexInclusion(
+export async function verifyHexInclusion(
+  hash: MmrHash,
   root: Uint8Array,
-  mmrSize: bigint,
+  size: bigint,
   leafIndex: bigint,
   identity: string,
   proof: readonly Uint8Array[],
-): boolean {
+): Promise<boolean> {
+  const value = hex(identity);
   return (
-    /^[0-9a-f]{64}$/u.test(identity) &&
-    verifyInclusionValue(
-      root,
-      mmrSize,
-      leafIndex,
-      Buffer.from(identity, "hex"),
-      proof,
-    )
+    value !== undefined &&
+    verifyInclusionValue(hash, root, size, leafIndex, value, proof)
   );
 }
-
-export function verifyConsistency(
+export async function verifyConsistency(
+  hash: MmrHash,
   oldRoot: Uint8Array,
   newRoot: Uint8Array,
   proof: MmrConsistencyProof,
-): boolean {
-  const oldLeaves = leafCount(proof.oldSize);
-  const newLeaves = leafCount(proof.newSize);
+): Promise<boolean> {
+  const a = leafCount(proof.oldSize),
+    b = leafCount(proof.newSize);
   if (
-    oldLeaves === undefined ||
-    newLeaves === undefined ||
-    proof.oldSize <= 0n ||
+    !a ||
+    b === undefined ||
     proof.oldSize > proof.newSize ||
-    proof.oldPeaks.some((item) => !validHash(item)) ||
-    proof.newPeaks.some((item) => !validHash(item)) ||
-    proof.witness.length !== proof.oldPeaks.length
+    proof.witness.length !== proof.oldPeaks.length ||
+    proof.oldPeaks.some((x) => !ok(x)) ||
+    proof.newPeaks.some((x) => !ok(x))
   )
     return false;
   if (
-    !Buffer.from(rootFromPeaks(proof.oldPeaks)).equals(Buffer.from(oldRoot)) ||
-    !Buffer.from(rootFromPeaks(proof.newPeaks)).equals(Buffer.from(newRoot))
+    !same(await rootFromPeaks(hash, proof.oldPeaks), oldRoot) ||
+    !same(await rootFromPeaks(hash, proof.newPeaks), newRoot)
   )
     return false;
-  const oldShape = peakLayout(oldLeaves);
-  const newShape = peakLayout(newLeaves);
-  if (
-    oldShape.length !== proof.oldPeaks.length ||
-    newShape.length !== proof.newPeaks.length
-  )
-    return false;
-  for (let index = 0; index < oldShape.length; index += 1) {
-    const oldPeak = oldShape[index]!;
-    let value = proof.oldPeaks[index]!;
-    let cursor = 0;
-    const path = proof.witness[index]!;
-    const newPeakIndex = newShape.findIndex(
-      (peak) =>
-        oldPeak.leafStart >= peak.leafStart &&
-        oldPeak.leafStart + oldPeak.leaves <= peak.leafStart + peak.leaves,
-    );
-    if (newPeakIndex < 0) return false;
-    const steps = pathToPeak(
-      newShape[newPeakIndex]!,
-      oldPeak.leafStart,
-      oldPeak.leaves,
-    );
-    if (steps === undefined) return false;
-    for (const step of steps) {
-      const sibling = path[cursor++];
-      if (sibling === undefined) return false;
-      value = step.isLeft
-        ? parentHash(value, sibling, step.parent)
-        : parentHash(sibling, value, step.parent);
+  const old = shape(Number(a)),
+    next = shape(Number(b));
+  for (let j = 0; j < old.peaks.length; j += 1) {
+    let p = old.peaks[j]!,
+      v = proof.oldPeaks[j]!,
+      k = 0;
+    while (next.meta[p]!.parent !== undefined) {
+      const q = next.meta[p]!.parent!,
+        m = next.meta[q]!,
+        x = proof.witness[j]![k++];
+      if (!x || !ok(x)) return false;
+      v =
+        m.left === p
+          ? await parent(hash, v, x, q)
+          : await parent(hash, x, v, q);
+      p = q;
     }
-    if (cursor !== path.length) return false;
-    if (!Buffer.from(value).equals(Buffer.from(proof.newPeaks[newPeakIndex]!)))
+    const peak = next.peaks.indexOf(p);
+    if (k !== proof.witness[j]!.length || !same(v, proof.newPeaks[peak]!))
       return false;
   }
   return true;

@@ -38,45 +38,45 @@ function tamperReceiptPath(bytes: Uint8Array): Uint8Array {
 }
 
 describe("capsule-anchor receipt interoperability", () => {
-  it("verifies the pinned real checkpoint and witness receipt", () => {
-    expect(new ReceiptVerifier(authorityKey).verify(checkpoint, receipt)).toBe(
-      true,
-    );
+  it("verifies the pinned real checkpoint and witness receipt", async () => {
+    expect(
+      await new ReceiptVerifier(authorityKey).verify(checkpoint, receipt),
+    ).toBe(true);
   });
 
-  it("rejects every authenticated binding when tampered", () => {
+  it("rejects every authenticated binding when tampered", async () => {
     const verifier = new ReceiptVerifier(authorityKey);
     expect(
-      new ReceiptVerifier(Uint8Array.from(authorityKey, () => 0)).verify(
+      await new ReceiptVerifier(Uint8Array.from(authorityKey, () => 0)).verify(
         checkpoint,
         receipt,
       ),
     ).toBe(false);
     const signature = Uint8Array.from(receipt.bytes);
     signature[signature.length - 1] = signature[signature.length - 1]! ^ 1;
-    expect(verifier.verify(checkpoint, { ...receipt, bytes: signature })).toBe(
-      false,
-    );
     expect(
-      verifier.verify(checkpoint, {
+      await verifier.verify(checkpoint, { ...receipt, bytes: signature }),
+    ).toBe(false);
+    expect(
+      await verifier.verify(checkpoint, {
         ...receipt,
         entryHash: `0${receipt.entryHash.slice(1)}`,
       }),
     ).toBe(false);
     expect(
-      verifier.verify(checkpoint, {
+      await verifier.verify(checkpoint, {
         ...receipt,
         leafIndex: receipt.leafIndex - 1,
       }),
     ).toBe(false);
     expect(
-      verifier.verify(checkpoint, {
+      await verifier.verify(checkpoint, {
         ...receipt,
         treeSize: receipt.treeSize + 1,
       }),
     ).toBe(false);
     expect(
-      verifier.verify(checkpoint, {
+      await verifier.verify(checkpoint, {
         ...receipt,
         bytes: tamperReceiptPath(receipt.bytes),
       }),

@@ -4,7 +4,7 @@ import {
   type ConsistencyProof,
   type SignedCheckpoint,
 } from "./checkpoint.js";
-import { leafCount, MmrTree } from "./mmr.js";
+import { leafCount, MmrTree } from "./mmr-node.js";
 import { WakeSignal } from "./run-loop.js";
 import {
   CllError,
@@ -130,7 +130,7 @@ export class CheckpointRunner {
       current.checkpointIndexedSeq !== undefined &&
       current.checkpointPeaks !== undefined
     ) {
-      const metadata = checkpointMetadata(current.checkpoint);
+      const metadata = await checkpointMetadata(current.checkpoint);
       if (
         current.checkpointSize > current.size ||
         leafCount(current.checkpointSize) !== current.checkpointIndexedSeq
@@ -141,7 +141,7 @@ export class CheckpointRunner {
         );
       let expectedPeaks: readonly Uint8Array[];
       try {
-        expectedPeaks = tree.peakHashesAt(current.checkpointSize);
+        expectedPeaks = await tree.peakHashesAt(current.checkpointSize);
       } catch (error) {
         throw new CllError("corrupt", "stored checkpoint size is invalid", {
           cause: error,
@@ -177,7 +177,7 @@ export class CheckpointRunner {
           throw new CllError("corrupt", "CLL sequence is not contiguous");
         if (!Number.isFinite(entry.appendedAt.getTime()))
           throw new CllError("corrupt", "CLL entry append time is invalid");
-        tree.append(entry.value);
+        await tree.append(entry.value);
         cursor = entry.seq;
         firstPendingAt ??= entry.appendedAt;
       }
@@ -203,7 +203,7 @@ export class CheckpointRunner {
       const previousPeaks = current.checkpointPeaks ?? [];
       let consistencyProof: ConsistencyProof | undefined;
       if (previousSize > 0n) {
-        const proof = tree.consistencyProof(previousSize);
+        const proof = await tree.consistencyProof(previousSize);
         consistencyProof = {
           sizeA: proof.oldSize,
           sizeB: proof.newSize,
@@ -212,7 +212,7 @@ export class CheckpointRunner {
           newPeaks: proof.newPeaks,
         };
       }
-      signed = signCheckpoint({
+      signed = await signCheckpoint({
         logId: this.options.logId,
         mmrSize: tree.size,
         peaks: tree.peakHashes(),

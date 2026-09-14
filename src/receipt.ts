@@ -73,7 +73,10 @@ export class ReceiptVerifier {
     this.publicKey = Uint8Array.from(publicKey);
   }
 
-  public verify(checkpoint: Uint8Array, receipt: WitnessReceipt): boolean {
+  public async verify(
+    checkpoint: Uint8Array,
+    receipt: WitnessReceipt,
+  ): Promise<boolean> {
     try {
       if (
         receipt.bytes.length === 0 ||
@@ -86,7 +89,7 @@ export class ReceiptVerifier {
         receipt.bytes[0] !== 0xd2
       )
         return false;
-      const entry = checkpointEntryHash(checkpoint);
+      const entry = await checkpointEntryHash(checkpoint);
       if (
         entry === undefined ||
         Buffer.from(entry).toString("hex") !== receipt.entryHash

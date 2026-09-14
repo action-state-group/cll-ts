@@ -12,7 +12,7 @@ import {
   leafCount,
   rootFromPeaks,
   verifyConsistency,
-} from "./mmr.js";
+} from "./mmr-node.js";
 import {
   CllError,
   limits,
@@ -128,25 +128,27 @@ const proofWire = (proof: ConsistencyProof) => ({
 });
 
 /** Canonical JSON projection whose double hash is the legacy witness entry. */
-export function checkpointProjection(input: CheckpointProjectionInput) {
+export async function checkpointProjection(input: CheckpointProjectionInput) {
   const previousSize = BigInt(input.previousSize);
   return {
     v: 1,
     kind: "mmr_checkpoint",
     log_id: input.logId,
     mmr_size: Number(input.mmrSize),
-    root: Buffer.from(rootFromPeaks(input.peaks)).toString("hex"),
+    root: Buffer.from(await rootFromPeaks(input.peaks)).toString("hex"),
     prev_size: Number(previousSize),
     prev_root:
       previousSize === 0n
         ? ""
-        : Buffer.from(rootFromPeaks(input.previousPeaks)).toString("hex"),
+        : Buffer.from(await rootFromPeaks(input.previousPeaks)).toString("hex"),
     key_id: input.keyId,
     timestamp: input.timestamp,
   };
 }
 
-export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
+export async function signCheckpoint(
+  input: CheckpointInput,
+): Promise<SignedCheckpoint> {
   validateIdentifier(input.logId);
   if (
     input.cadence !== undefined &&
@@ -180,13 +182,13 @@ export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
       "invalid",
       "non-first checkpoint requires matching consistency proof",
     );
-  const root = Buffer.from(rootFromPeaks(input.peaks)).toString("hex");
-  const previousRoot = Buffer.from(rootFromPeaks(input.previousPeaks)).toString(
-    "hex",
-  );
+  const root = Buffer.from(await rootFromPeaks(input.peaks)).toString("hex");
+  const previousRoot = Buffer.from(
+    await rootFromPeaks(input.previousPeaks),
+  ).toString("hex");
   const timestamp = formatTime(input.timestamp);
   const keyId = Buffer.from(input.identity.publicKey).toString("hex");
-  const projection = checkpointProjection({
+  const projection = await checkpointProjection({
     logId: input.logId,
     mmrSize: input.mmrSize,
     peaks: input.peaks,
@@ -250,7 +252,7 @@ export function signCheckpoint(input: CheckpointInput): SignedCheckpoint {
   };
 }
 
-export function verifyCheckpoint(cose: Uint8Array): boolean {
+export async function verifyCheckpoint(cose: Uint8Array): Promise<boolean> {
   try {
     if (
       cose.length < 2 ||
@@ -403,13 +405,17 @@ export function verifyCheckpoint(cose: Uint8Array): boolean {
         !Buffer.from(encodeCanonical(newPeaks)).equals(
           Buffer.from(encodeCanonical(peaks)),
         ) ||
-        !verifyConsistency(rootFromPeaks(previousPeaks), rootFromPeaks(peaks), {
-          oldSize: BigInt(previousSize as number),
-          newSize: BigInt(logSize as number),
-          oldPeaks: oldPeaks as Uint8Array[],
-          witness: witness as Uint8Array[][],
-          newPeaks: newPeaks as Uint8Array[],
-        })
+        !(await verifyConsistency(
+          await rootFromPeaks(previousPeaks),
+          await rootFromPeaks(peaks),
+          {
+            oldSize: BigInt(previousSize as number),
+            newSize: BigInt(logSize as number),
+            oldPeaks: oldPeaks as Uint8Array[],
+            witness: witness as Uint8Array[][],
+            newPeaks: newPeaks as Uint8Array[],
+          },
+        ))
       )
         return false;
     }
@@ -448,10 +454,10 @@ export interface CheckpointMetadata {
 }
 
 /** Return linkage metadata only after the complete checkpoint validates. */
-export function checkpointMetadata(
+export async function checkpointMetadata(
   cose: Uint8Array,
-): CheckpointMetadata | undefined {
-  if (!verifyCheckpoint(cose)) return undefined;
+): Promise<CheckpointMetadata | undefined> {
+  if (!(await verifyCheckpoint(cose))) return undefined;
   const items = decode(cose.subarray(1), {
     allowIndefinite: false,
     coerceUndefinedToNull: false,
@@ -483,11 +489,11 @@ export function checkpointMetadata(
     peaks,
     previousSize,
     previousPeaks,
-    root: Buffer.from(rootFromPeaks(peaks)).toString("hex"),
+    root: Buffer.from(await rootFromPeaks(peaks)).toString("hex"),
     previousRoot:
       previousSize === 0n
         ? ""
-        : Buffer.from(rootFromPeaks(previousPeaks)).toString("hex"),
+        : Buffer.from(await rootFromPeaks(previousPeaks)).toString("hex"),
     keyId: Buffer.from(headers.get(4) as Uint8Array).toString("hex"),
     timestamp: claims.get("issued_at") as string,
     ...(claims.has("cadence")
@@ -497,10 +503,12 @@ export function checkpointMetadata(
 }
 
 /** Return the RFC 9162 checkpoint entry hash after full checkpoint validation. */
-export function checkpointEntryHash(cose: Uint8Array): Uint8Array | undefined {
-  const metadata = checkpointMetadata(cose);
+export async function checkpointEntryHash(
+  cose: Uint8Array,
+): Promise<Uint8Array | undefined> {
+  const metadata = await checkpointMetadata(cose);
   if (metadata === undefined) return undefined;
-  const projection = checkpointProjection({
+  const projection = await checkpointProjection({
     logId: metadata.logId,
     mmrSize: metadata.size,
     peaks: metadata.peaks,

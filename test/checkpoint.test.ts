@@ -81,16 +81,16 @@ describe("checkpoint COSE", () => {
     await expect(runner.runOnce()).rejects.toMatchObject({ code: "corrupt" });
   });
 
-  it("signs a self-verifying first checkpoint", () => {
+  it("signs a self-verifying first checkpoint", async () => {
     const tree = new MmrTree();
-    tree.append(Buffer.from("11".repeat(32), "hex"));
+    await tree.append(Buffer.from("11".repeat(32), "hex"));
     const identity = createCheckpointIdentity(
       Buffer.from(
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "hex",
       ),
     );
-    const checkpoint = signCheckpoint({
+    const checkpoint = await signCheckpoint({
       logId: "test-log",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),
@@ -99,8 +99,8 @@ describe("checkpoint COSE", () => {
       timestamp: "2026-09-01T12:34:56.836Z",
       identity,
     });
-    expect(verifyCheckpoint(checkpoint.cose)).toBe(true);
-    expect(checkpointMetadata(checkpoint.cose)).toMatchObject({
+    expect(await verifyCheckpoint(checkpoint.cose)).toBe(true);
+    expect(await checkpointMetadata(checkpoint.cose)).toMatchObject({
       logId: "test-log",
       size: tree.size,
       root: checkpoint.root,
@@ -109,17 +109,17 @@ describe("checkpoint COSE", () => {
       keyId: checkpoint.keyId,
       timestamp: checkpoint.timestamp,
     });
-    expect(checkpointEntryHash(checkpoint.cose)).toHaveLength(32);
+    expect(await checkpointEntryHash(checkpoint.cose)).toHaveLength(32);
     expect(checkpoint.previousRoot).toBe("");
     expect(checkpoint.json.length).toBeGreaterThan(0);
     const tampered = Uint8Array.from(checkpoint.cose);
     const last = tampered.length - 1;
     tampered[last] = (tampered[last] ?? 0) ^ 1;
-    expect(verifyCheckpoint(tampered)).toBe(false);
+    expect(await verifyCheckpoint(tampered)).toBe(false);
   });
-  it("rejects an invalid checkpoint cadence before signing", () => {
+  it("rejects an invalid checkpoint cadence before signing", async () => {
     const tree = new MmrTree();
-    tree.append(new Uint8Array(32));
+    await tree.append(new Uint8Array(32));
     const identity = createCheckpointIdentity(new Uint8Array(32));
     const input = {
       logId: "cadence-log",
@@ -130,12 +130,12 @@ describe("checkpoint COSE", () => {
       timestamp: new Date(0),
       identity,
     };
-    expect(() => signCheckpoint({ ...input, cadence: 0 })).toThrow(
+    await expect(signCheckpoint({ ...input, cadence: 0 })).rejects.toThrow(
       "positive portable integer",
     );
-    expect(() =>
+    await expect(
       signCheckpoint({ ...input, cadence: Number.MAX_SAFE_INTEGER + 1 }),
-    ).toThrow("positive portable integer");
+    ).rejects.toThrow("positive portable integer");
   });
 
   it("persists checkpoint and lets permanent witness failure coexist with success", async () => {
@@ -210,8 +210,8 @@ describe("checkpoint COSE", () => {
   it("does not let a slow witness starve an independent witness", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.append(Buffer.from("11".repeat(32), "hex"));
-    const signed = signCheckpoint({
+    await tree.append(Buffer.from("11".repeat(32), "hex"));
+    const signed = await signCheckpoint({
       logId: "parallel-witnesses",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),
@@ -282,8 +282,8 @@ describe("checkpoint COSE", () => {
   it("fails closed and retries when a verifier is not configured", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.append(Buffer.from("11".repeat(32), "hex"));
-    const signed = signCheckpoint({
+    await tree.append(Buffer.from("11".repeat(32), "hex"));
+    const signed = await signCheckpoint({
       logId: "unverified",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),
@@ -336,9 +336,9 @@ describe("checkpoint COSE", () => {
   it("backs retryable witness failures off without marking them permanent", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.append(Buffer.from("11".repeat(32), "hex"));
+    await tree.append(Buffer.from("11".repeat(32), "hex"));
     const identity = createCheckpointIdentity(new Uint8Array(32));
-    const signed = signCheckpoint({
+    const signed = await signCheckpoint({
       logId: "retryable",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),
@@ -460,8 +460,8 @@ describe("checkpoint COSE", () => {
   it("aborts an in-flight witness request without recording a failed attempt", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.append(Buffer.from("11".repeat(32), "hex"));
-    const signed = signCheckpoint({
+    await tree.append(Buffer.from("11".repeat(32), "hex"));
+    const signed = await signCheckpoint({
       logId: "abort-request",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),
@@ -550,8 +550,8 @@ describe("checkpoint COSE", () => {
     });
     const first = await runner.runOnce();
     expect(first).toBeDefined();
-    expect(verifyCheckpoint(first!.cose)).toBe(true);
-    expect(checkpointMetadata(first!.cose)?.previousSize).toBe(0n);
+    expect(await verifyCheckpoint(first!.cose)).toBe(true);
+    expect((await checkpointMetadata(first!.cose))?.previousSize).toBe(0n);
 
     await store.append({
       value: valueB,
@@ -561,8 +561,8 @@ describe("checkpoint COSE", () => {
     expect(second).toBeDefined();
     // The second checkpoint carries an auto-generated consistency proof that
     // verifyCheckpoint validates against the first checkpoint's size/root.
-    expect(verifyCheckpoint(second!.cose)).toBe(true);
-    const secondMetadata = checkpointMetadata(second!.cose);
+    expect(await verifyCheckpoint(second!.cose)).toBe(true);
+    const secondMetadata = await checkpointMetadata(second!.cose);
     expect(secondMetadata?.size).toBe(second!.mmrSize);
     expect(secondMetadata?.previousSize).toBe(first!.mmrSize);
     expect(secondMetadata?.previousRoot).toBe(first!.root);
@@ -570,11 +570,17 @@ describe("checkpoint COSE", () => {
     // Inclusion-proof round-trip against the durable MMR state.
     const state = await store.loadCll();
     const tree = new MmrTree(state.nodes);
-    const root = tree.root();
+    const root = await tree.root();
     for (const [leafIndex, value] of [valueA, valueB].entries()) {
-      const proof = tree.inclusionProof(BigInt(leafIndex));
+      const proof = await tree.inclusionProof(BigInt(leafIndex));
       expect(
-        verifyInclusionValue(root, tree.size, BigInt(leafIndex), value, proof),
+        await verifyInclusionValue(
+          root,
+          tree.size,
+          BigInt(leafIndex),
+          value,
+          proof,
+        ),
       ).toBe(true);
     }
     await store.close();
@@ -583,9 +589,9 @@ describe("checkpoint COSE", () => {
   it("rejects a checkpoint size beyond stored CLL state", async () => {
     const store = new MemoryStore();
     const tree = new MmrTree();
-    tree.append(Buffer.from("11".repeat(32), "hex"));
+    await tree.append(Buffer.from("11".repeat(32), "hex"));
     const identity = createCheckpointIdentity(new Uint8Array(32));
-    const signed = signCheckpoint({
+    const signed = await signCheckpoint({
       logId: "corrupt-size",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),

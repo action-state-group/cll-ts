@@ -15,8 +15,8 @@ if (mode === "write") {
   const seed = Uint8Array.from({ length: 32 }, (_, index) => index);
   const identity = createCheckpointIdentity(seed);
   const tree = new MmrTree();
-  tree.append(Uint8Array.from({ length: 32 }, () => 0x11));
-  const checkpoint = signCheckpoint({
+  await tree.append(Uint8Array.from({ length: 32 }, () => 0x11));
+  const checkpoint = await signCheckpoint({
     logId: "interop-log",
     mmrSize: tree.size,
     peaks: tree.peakHashes(),
@@ -26,6 +26,6 @@ if (mode === "write") {
     identity,
   });
   await writeFile(path, checkpoint.cose, { mode: 0o600 });
-} else if (!verifyCheckpoint(await readFile(path))) {
+} else if (!(await verifyCheckpoint(await readFile(path)))) {
   throw new Error("TypeScript rejected checkpoint");
 }

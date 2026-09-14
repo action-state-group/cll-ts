@@ -1,0 +1,381 @@
+{
+  "format_version": "1",
+  "spec": "CLL MMR core proof and root vectors",
+  "hashing": {
+    "body_digest": "sha256(UTF-8(leaf_identity.template with {seq}))",
+    "leaf_hash": "sha256(0x00 || body_digest)",
+    "interior_hash": "sha256(be64(position + 1) || left || right)",
+    "root": "bag peaks right-to-left: sha256(right || left); empty root is 32 zero bytes"
+  },
+  "leaf_identity": {
+    "template": "asg-ledger-mmr-vector-leaf-{seq}",
+    "seq_start": 1,
+    "leaf_index": "zero-based MMR leaf index; leaf_index == seq - 1"
+  },
+  "count": 19,
+  "cases": [
+    {
+      "name": "root-1-leaves",
+      "kind": "root",
+      "description": "MMR root after 1 fixture leaf.",
+      "leaf_count": 1,
+      "size": 1,
+      "leaf_identity_inputs": { "seq_range": [1, 1] },
+      "root_hex": "184208f662bb7a6f5cc14a39988f74f2bb05bd3f934311da0aa3f65a950d8e01"
+    },
+    {
+      "name": "root-2-leaves",
+      "kind": "root",
+      "description": "MMR root after 2 fixture leaves.",
+      "leaf_count": 2,
+      "size": 3,
+      "leaf_identity_inputs": { "seq_range": [1, 2] },
+      "root_hex": "f7b19d3f831d2cddfe91865465a8beb649e4bf16c3aa2fde7378e7ee2e215694"
+    },
+    {
+      "name": "root-3-leaves",
+      "kind": "root",
+      "description": "MMR root after 3 fixture leaves.",
+      "leaf_count": 3,
+      "size": 4,
+      "leaf_identity_inputs": { "seq_range": [1, 3] },
+      "root_hex": "e5280e43815bcb82f184d4dbe10741b65a28c34488a9a3029e0e08d1cbed9a17"
+    },
+    {
+      "name": "root-4-leaves",
+      "kind": "root",
+      "description": "MMR root after 4 fixture leaves.",
+      "leaf_count": 4,
+      "size": 7,
+      "leaf_identity_inputs": { "seq_range": [1, 4] },
+      "root_hex": "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755"
+    },
+    {
+      "name": "root-5-leaves",
+      "kind": "root",
+      "description": "MMR root after 5 fixture leaves.",
+      "leaf_count": 5,
+      "size": 8,
+      "leaf_identity_inputs": { "seq_range": [1, 5] },
+      "root_hex": "a19de527084fc32502d998b4dd0e73f942d3b4ddc55b2c093dfd907e95a93f1a"
+    },
+    {
+      "name": "root-6-leaves",
+      "kind": "root",
+      "description": "MMR root after 6 fixture leaves.",
+      "leaf_count": 6,
+      "size": 10,
+      "leaf_identity_inputs": { "seq_range": [1, 6] },
+      "root_hex": "ade39981df4d01db5a3c3e5d1ff0a6f87ea3a63077820d37599c6a39fb904b01"
+    },
+    {
+      "name": "root-7-leaves",
+      "kind": "root",
+      "description": "MMR root after 7 fixture leaves; shared replacement for cll-go's hardcoded 7-leaf KAT.",
+      "leaf_count": 7,
+      "size": 11,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "root_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10"
+    },
+
+    {
+      "name": "inclusion-1-leaves-leaf-0",
+      "kind": "inclusion",
+      "description": "Inclusion of zero-based leaf_index 0 (seq 1) in the 1-leaf fixture.",
+      "leaf_count": 1,
+      "size": 1,
+      "leaf_index": 0,
+      "leaf_identity_inputs": { "seq_range": [1, 1] },
+      "body_digest_hex": "c0fce8ae20e1ec53ba801443d30ef6d262a81de1610736eefdef40764f1ec4fe",
+      "root_hex": "184208f662bb7a6f5cc14a39988f74f2bb05bd3f934311da0aa3f65a950d8e01",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 1,
+        "leaf_index": 0,
+        "witness": [],
+        "peaks_left": [],
+        "peaks_right": []
+      }
+    },
+    {
+      "name": "inclusion-2-leaves-leaf-0",
+      "kind": "inclusion",
+      "description": "First leaf inclusion at 2 leaves.",
+      "leaf_count": 2,
+      "size": 3,
+      "leaf_index": 0,
+      "leaf_identity_inputs": { "seq_range": [1, 2] },
+      "body_digest_hex": "c0fce8ae20e1ec53ba801443d30ef6d262a81de1610736eefdef40764f1ec4fe",
+      "root_hex": "f7b19d3f831d2cddfe91865465a8beb649e4bf16c3aa2fde7378e7ee2e215694",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 3,
+        "leaf_index": 0,
+        "witness": [
+          "be87c6b74ae0f1a5b9dcc48a8b8ea403e7183d11abbe3cd8f423d23974d6b31e"
+        ],
+        "peaks_left": [],
+        "peaks_right": []
+      }
+    },
+    {
+      "name": "inclusion-2-leaves-leaf-1",
+      "kind": "inclusion",
+      "description": "Later leaf inclusion at 2 leaves.",
+      "leaf_count": 2,
+      "size": 3,
+      "leaf_index": 1,
+      "leaf_identity_inputs": { "seq_range": [1, 2] },
+      "body_digest_hex": "1618f95e65c0f826877c4324f2653d81ffad43a68336ab94bbd29cf82bafc7f9",
+      "root_hex": "f7b19d3f831d2cddfe91865465a8beb649e4bf16c3aa2fde7378e7ee2e215694",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 3,
+        "leaf_index": 1,
+        "witness": [
+          "184208f662bb7a6f5cc14a39988f74f2bb05bd3f934311da0aa3f65a950d8e01"
+        ],
+        "peaks_left": [],
+        "peaks_right": []
+      }
+    },
+    {
+      "name": "inclusion-5-leaves-leaf-0",
+      "kind": "inclusion",
+      "description": "First leaf inclusion at 5 leaves, with a two-step witness and a right peak.",
+      "leaf_count": 5,
+      "size": 8,
+      "leaf_index": 0,
+      "leaf_identity_inputs": { "seq_range": [1, 5] },
+      "body_digest_hex": "c0fce8ae20e1ec53ba801443d30ef6d262a81de1610736eefdef40764f1ec4fe",
+      "root_hex": "a19de527084fc32502d998b4dd0e73f942d3b4ddc55b2c093dfd907e95a93f1a",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 8,
+        "leaf_index": 0,
+        "witness": [
+          "be87c6b74ae0f1a5b9dcc48a8b8ea403e7183d11abbe3cd8f423d23974d6b31e",
+          "05c9493be026d8315757aa79d5bea709b5e51fb8ce61c011a55bb78a04ce20c1"
+        ],
+        "peaks_left": [],
+        "peaks_right": [
+          "71235381e2cb35478270e72fab0bc96ac0ee43de2078f035c240687fbe9365bb"
+        ]
+      }
+    },
+    {
+      "name": "inclusion-5-leaves-leaf-3",
+      "kind": "inclusion",
+      "description": "Later leaf inclusion at 5 leaves; exercises right-child path ordering.",
+      "leaf_count": 5,
+      "size": 8,
+      "leaf_index": 3,
+      "leaf_identity_inputs": { "seq_range": [1, 5] },
+      "body_digest_hex": "3c264deb4bcfcaa1c0ad024f1d578574a816ac202926f271938ef2c57c0f33a7",
+      "root_hex": "a19de527084fc32502d998b4dd0e73f942d3b4ddc55b2c093dfd907e95a93f1a",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 8,
+        "leaf_index": 3,
+        "witness": [
+          "9f596bd4047b2ad4f7fcb13c2123e2c6de1f8c2e42caacf93b4515aaa15a78e3",
+          "f7b19d3f831d2cddfe91865465a8beb649e4bf16c3aa2fde7378e7ee2e215694"
+        ],
+        "peaks_left": [],
+        "peaks_right": [
+          "71235381e2cb35478270e72fab0bc96ac0ee43de2078f035c240687fbe9365bb"
+        ]
+      }
+    },
+    {
+      "name": "inclusion-7-leaves-leaf-0",
+      "kind": "inclusion",
+      "description": "First leaf inclusion at 7 leaves, with two right peaks.",
+      "leaf_count": 7,
+      "size": 11,
+      "leaf_index": 0,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "body_digest_hex": "c0fce8ae20e1ec53ba801443d30ef6d262a81de1610736eefdef40764f1ec4fe",
+      "root_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 11,
+        "leaf_index": 0,
+        "witness": [
+          "be87c6b74ae0f1a5b9dcc48a8b8ea403e7183d11abbe3cd8f423d23974d6b31e",
+          "05c9493be026d8315757aa79d5bea709b5e51fb8ce61c011a55bb78a04ce20c1"
+        ],
+        "peaks_left": [],
+        "peaks_right": [
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d",
+          "209f48917e02c4d5c95fc3e9f33d9d763cca7b1e1a3e745397f942efc8ac4e92"
+        ]
+      }
+    },
+    {
+      "name": "inclusion-7-leaves-leaf-6",
+      "kind": "inclusion",
+      "description": "Later leaf inclusion at 7 leaves; exercises peak-only inclusion.",
+      "leaf_count": 7,
+      "size": 11,
+      "leaf_index": 6,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "body_digest_hex": "674a568ceae311530d1667678ffc2f89733efd79d59135d2c85620d782cab3eb",
+      "root_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "proof": {
+        "v": 1,
+        "kind": "inclusion",
+        "size": 11,
+        "leaf_index": 6,
+        "witness": [],
+        "peaks_left": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d"
+        ],
+        "peaks_right": []
+      }
+    },
+
+    {
+      "name": "consistency-0-to-0-leaves",
+      "kind": "consistency",
+      "description": "Empty-to-empty edge case: all proof arrays are empty.",
+      "leaf_count_a": 0,
+      "leaf_count_b": 0,
+      "size_a": 0,
+      "size_b": 0,
+      "leaf_identity_inputs": { "seq_range": [1, 0] },
+      "root_a_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "root_b_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proof": {
+        "v": 1,
+        "kind": "consistency",
+        "size_a": 0,
+        "size_b": 0,
+        "old_peaks": [],
+        "witness": [],
+        "new_peaks": []
+      }
+    },
+    {
+      "name": "consistency-0-to-7-leaves",
+      "kind": "consistency",
+      "description": "Empty MMR extended to 7 leaves.",
+      "leaf_count_a": 0,
+      "leaf_count_b": 7,
+      "size_a": 0,
+      "size_b": 11,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "root_a_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "root_b_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "proof": {
+        "v": 1,
+        "kind": "consistency",
+        "size_a": 0,
+        "size_b": 11,
+        "old_peaks": [],
+        "witness": [],
+        "new_peaks": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d",
+          "209f48917e02c4d5c95fc3e9f33d9d763cca7b1e1a3e745397f942efc8ac4e92"
+        ]
+      }
+    },
+    {
+      "name": "consistency-2-to-7-leaves",
+      "kind": "consistency",
+      "description": "2 leaves extended to 7 leaves.",
+      "leaf_count_a": 2,
+      "leaf_count_b": 7,
+      "size_a": 3,
+      "size_b": 11,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "root_a_hex": "f7b19d3f831d2cddfe91865465a8beb649e4bf16c3aa2fde7378e7ee2e215694",
+      "root_b_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "proof": {
+        "v": 1,
+        "kind": "consistency",
+        "size_a": 3,
+        "size_b": 11,
+        "old_peaks": [
+          "f7b19d3f831d2cddfe91865465a8beb649e4bf16c3aa2fde7378e7ee2e215694"
+        ],
+        "witness": [
+          ["05c9493be026d8315757aa79d5bea709b5e51fb8ce61c011a55bb78a04ce20c1"]
+        ],
+        "new_peaks": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d",
+          "209f48917e02c4d5c95fc3e9f33d9d763cca7b1e1a3e745397f942efc8ac4e92"
+        ]
+      }
+    },
+    {
+      "name": "consistency-5-to-7-leaves",
+      "kind": "consistency",
+      "description": "5 leaves extended to 7 leaves; one old peak is retained and one grows.",
+      "leaf_count_a": 5,
+      "leaf_count_b": 7,
+      "size_a": 8,
+      "size_b": 11,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "root_a_hex": "a19de527084fc32502d998b4dd0e73f942d3b4ddc55b2c093dfd907e95a93f1a",
+      "root_b_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "proof": {
+        "v": 1,
+        "kind": "consistency",
+        "size_a": 8,
+        "size_b": 11,
+        "old_peaks": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "71235381e2cb35478270e72fab0bc96ac0ee43de2078f035c240687fbe9365bb"
+        ],
+        "witness": [
+          [],
+          ["407ba97db4cf85f9b940f238540785c8a7998f45b4f570bc15e19bb7411efe4f"]
+        ],
+        "new_peaks": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d",
+          "209f48917e02c4d5c95fc3e9f33d9d763cca7b1e1a3e745397f942efc8ac4e92"
+        ]
+      }
+    },
+    {
+      "name": "consistency-7-to-7-leaves",
+      "kind": "consistency",
+      "description": "Same-size edge case: every per-old-peak witness is empty.",
+      "leaf_count_a": 7,
+      "leaf_count_b": 7,
+      "size_a": 11,
+      "size_b": 11,
+      "leaf_identity_inputs": { "seq_range": [1, 7] },
+      "root_a_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "root_b_hex": "a0c0e8e7d78bf06dee4c988a228ff034dca8a25964a4af89a3d7d11670f31d10",
+      "proof": {
+        "v": 1,
+        "kind": "consistency",
+        "size_a": 11,
+        "size_b": 11,
+        "old_peaks": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d",
+          "209f48917e02c4d5c95fc3e9f33d9d763cca7b1e1a3e745397f942efc8ac4e92"
+        ],
+        "witness": [[], [], []],
+        "new_peaks": [
+          "44588de7a213cb67d681fd0822d22f57248a50b5cab4d5579c1d9162403b6755",
+          "0989e85a9157a320fda8aa5ce675e16246273f3ecc3002d56ce57166e016fd6d",
+          "209f48917e02c4d5c95fc3e9f33d9d763cca7b1e1a3e745397f942efc8ac4e92"
+        ]
+      }
+    }
+  ]
+}
