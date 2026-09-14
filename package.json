@@ -48,6 +48,7 @@
   },
   "scripts": {
     "build": "tsup && tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "oxlint src test",
