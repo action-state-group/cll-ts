@@ -438,7 +438,7 @@ function rangeWitnesses(
     return;
   }
   if (leafStart >= lo && leafEnd <= hi) return;
-  const half = span >> 1;
+  const half = 2 ** (height - 1);
   rangeWitnesses(nodes, pos - span, height - 1, leafStart, lo, hi, out);
   rangeWitnesses(nodes, pos - 1, height - 1, leafStart + half, lo, hi, out);
 }
@@ -501,7 +501,10 @@ export async function verifyRange(
       proof.to_index !== Number(toIndex)
     )
       return false;
-    if (size < 0n || fromIndex < 0n || toIndex < fromIndex) return false;
+    // MAX_MMR_SIZE parity with the Python reference (core.verify_range rejects
+    // size >= 2**50) — refuse absurd sizes before any traversal.
+    if (size < 0n || size >= 2n ** 50n || fromIndex < 0n || toIndex < fromIndex)
+      return false;
     if (!Array.isArray(proof.witness) || !Array.isArray(bodyDigests))
       return false;
     if (BigInt(bodyDigests.length) !== toIndex - fromIndex + 1n) return false;
@@ -537,7 +540,7 @@ export async function verifyRange(
       }
       if (height === 0)
         return hash(Uint8Array.of(0), bodyDigests[leafStart - lo]!);
-      const half = span >> 1,
+      const half = 2 ** (height - 1),
         left = await reconstruct(pos - span, height - 1, leafStart),
         right = await reconstruct(pos - 1, height - 1, leafStart + half);
       return parent(hash, left, right, pos);
