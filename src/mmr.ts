@@ -28,6 +28,14 @@ export interface MmrStructuredConsistencyProof {
   readonly witness: readonly (readonly string[])[];
   readonly new_peaks: readonly string[];
 }
+export interface MmrRangeProof {
+  readonly v: 1;
+  readonly kind: "range";
+  readonly size: number;
+  readonly from_index: number;
+  readonly to_index: number;
+  readonly witness: readonly string[];
+}
 const ok = (x: Uint8Array): boolean => x.length === 32;
 const same = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i]);
@@ -405,4 +413,145 @@ export async function verifyConsistency(
       return false;
   }
   return true;
+}
+// Depth-first walk of the subtree rooted at array position `pos` (height
+// `height`, covering leaf indices [leafStart, leafStart + 2**height - 1]):
+// appends one witness hash for every maximal subtree wholly outside [lo, hi],
+// recurses into any subtree the range only partially covers, and contributes
+// nothing for a subtree wholly inside [lo, hi] (the verifier rebuilds that part
+// from the leaf hashes it already holds). Left/right children of an interior
+// node at `pos` sit at pos - 2**height and pos - 1, matching the module's
+// post-order array layout (same convention as shape() and add_leaf).
+function rangeWitnesses(
+  nodes: readonly Uint8Array[],
+  pos: number,
+  height: number,
+  leafStart: number,
+  lo: number,
+  hi: number,
+  out: string[],
+): void {
+  const span = 2 ** height,
+    leafEnd = leafStart + span - 1;
+  if (leafEnd < lo || leafStart > hi) {
+    out.push(toHex(nodes[pos]!));
+    return;
+  }
+  if (leafStart >= lo && leafEnd <= hi) return;
+  const half = span >> 1;
+  rangeWitnesses(nodes, pos - span, height - 1, leafStart, lo, hi, out);
+  rangeWitnesses(nodes, pos - 1, height - 1, leafStart + half, lo, hi, out);
+}
+export async function rangeProof(
+  tree: MmrTree,
+  fromIndex: bigint,
+  toIndex: bigint,
+  size: bigint = tree.size,
+): Promise<MmrRangeProof> {
+  const leaves = leafCount(size);
+  if (
+    leaves === undefined ||
+    size > tree.size ||
+    fromIndex < 0n ||
+    toIndex < fromIndex ||
+    toIndex >= leaves
+  )
+    throw new RangeError("invalid MMR range proof request");
+  const s = shape(Number(leaves)),
+    nodes = tree.nodes(),
+    lo = Number(fromIndex),
+    hi = Number(toIndex),
+    witness: string[] = [];
+  let leafStart = 0;
+  for (const p of s.peaks) {
+    const h = s.meta[p]!.height;
+    rangeWitnesses(nodes, p, h, leafStart, lo, hi, witness);
+    leafStart += 2 ** h;
+  }
+  return {
+    v: 1,
+    kind: "range",
+    size: Number(size),
+    from_index: lo,
+    to_index: hi,
+    witness,
+  };
+}
+export async function verifyRange(
+  hash: MmrHash,
+  root: Uint8Array,
+  size: bigint,
+  fromIndex: bigint,
+  toIndex: bigint,
+  bodyDigests: readonly Uint8Array[],
+  proof: MmrRangeProof,
+): Promise<boolean> {
+  try {
+    if (!ok(root)) return false;
+    if (
+      proof === undefined ||
+      proof === null ||
+      proof.v !== 1 ||
+      proof.kind !== "range"
+    )
+      return false;
+    if (
+      proof.size !== Number(size) ||
+      proof.from_index !== Number(fromIndex) ||
+      proof.to_index !== Number(toIndex)
+    )
+      return false;
+    if (size < 0n || fromIndex < 0n || toIndex < fromIndex) return false;
+    if (!Array.isArray(proof.witness) || !Array.isArray(bodyDigests))
+      return false;
+    if (BigInt(bodyDigests.length) !== toIndex - fromIndex + 1n) return false;
+    const leaves = leafCount(size);
+    if (leaves === undefined || toIndex >= leaves) return false;
+    if (bodyDigests.some((d) => !ok(d))) return false;
+    const witnessBytes: Uint8Array[] = [];
+    for (const w of proof.witness) {
+      const b = hex(w);
+      if (!b) return false;
+      witnessBytes.push(b);
+    }
+    const s = shape(Number(leaves)),
+      lo = Number(fromIndex),
+      hi = Number(toIndex),
+      cursor = { index: 0 };
+    // Rebuild every peak the range touches: a subtree wholly outside [lo, hi]
+    // consumes one witness, a single covered leaf is hashed from its body
+    // digest, and a partially covered subtree folds its two reconstructed
+    // children. bodyDigests[i] is the body digest for leaf index lo + i.
+    const reconstruct = async (
+      pos: number,
+      height: number,
+      leafStart: number,
+    ): Promise<Uint8Array> => {
+      const span = 2 ** height,
+        leafEnd = leafStart + span - 1;
+      if (leafEnd < lo || leafStart > hi) {
+        const w = witnessBytes[cursor.index];
+        if (!w) throw new RangeError("range proof witness exhausted");
+        cursor.index += 1;
+        return w;
+      }
+      if (height === 0)
+        return hash(Uint8Array.of(0), bodyDigests[leafStart - lo]!);
+      const half = span >> 1,
+        left = await reconstruct(pos - span, height - 1, leafStart),
+        right = await reconstruct(pos - 1, height - 1, leafStart + half);
+      return parent(hash, left, right, pos);
+    };
+    const reconstructedPeaks: Uint8Array[] = [];
+    let leafStart = 0;
+    for (const p of s.peaks) {
+      const h = s.meta[p]!.height;
+      reconstructedPeaks.push(await reconstruct(p, h, leafStart));
+      leafStart += 2 ** h;
+    }
+    if (cursor.index !== witnessBytes.length) return false;
+    return same(await rootFromPeaks(hash, reconstructedPeaks), root);
+  } catch {
+    return false;
+  }
 }

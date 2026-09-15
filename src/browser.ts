@@ -5,13 +5,16 @@ import {
   consistencyProof,
   inclusionProof,
   leafCount,
+  rangeProof,
   rootFromPeaks as coreRootFromPeaks,
   verifyConsistency as coreVerifyConsistency,
   verifyHexInclusion as coreVerifyHexInclusion,
   verifyInclusionValue as coreVerifyInclusionValue,
+  verifyRange as coreVerifyRange,
   type MmrConsistencyProof,
   type MmrHash,
   type MmrInclusionProof,
+  type MmrRangeProof,
   type MmrStructuredConsistencyProof,
 } from "./mmr.js";
 
@@ -42,11 +45,18 @@ const hash: MmrHash = async (...parts) =>
     ).crypto.subtle.digest("SHA-256", join(...parts)),
   );
 
-export { commitmentObject, consistencyProof, inclusionProof, leafCount };
+export {
+  commitmentObject,
+  consistencyProof,
+  inclusionProof,
+  leafCount,
+  rangeProof,
+};
 export type {
   MmrConsistencyProof,
   MmrHash,
   MmrInclusionProof,
+  MmrRangeProof,
   MmrStructuredConsistencyProof,
 };
 export class MmrTree extends CoreMmrTree {
@@ -75,3 +85,11 @@ export const verifyConsistency = (
   newRoot: Uint8Array,
   proof: MmrConsistencyProof,
 ) => coreVerifyConsistency(hash, oldRoot, newRoot, proof);
+export const verifyRange = (
+  root: Uint8Array,
+  size: bigint,
+  fromIndex: bigint,
+  toIndex: bigint,
+  bodyDigests: readonly Uint8Array[],
+  proof: MmrRangeProof,
+) => coreVerifyRange(hash, root, size, fromIndex, toIndex, bodyDigests, proof);
