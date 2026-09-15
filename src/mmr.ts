@@ -102,8 +102,11 @@ function path(
 // but only runs producer-side over a tree that already holds every node; a
 // verifier must never allocate O(size) from an attacker-supplied `size`, so it
 // derives just the peaks and the single fold path it needs from these instead.
-const MAX_MMR_SIZE = 2 ** 50;
-type PathStep = { sibling: number; targetIsRight: boolean; parent: number };
+const MAX_MMR_SIZE = 2n ** 50n;
+// Witness hashes are consumed positionally (bottom-up), so a step only needs
+// which side the running value is on and the parent position for interior_hash;
+// the sibling's own position is never read, unlike the reference generators.
+type PathStep = { targetIsRight: boolean; parent: number };
 // Height (0 = leaf level) of the node at 0-indexed post-order position `pos`.
 function heightAt(pos: number): number {
   let pos1 = pos + 1,
@@ -170,18 +173,10 @@ function locatePath(
     const leftChild = curRoot - (2 ** curHeight - 1) - 1,
       rightChild = curRoot - 1;
     if (target <= leftChild) {
-      topDown.push({
-        sibling: rightChild,
-        targetIsRight: false,
-        parent: curRoot,
-      });
+      topDown.push({ targetIsRight: false, parent: curRoot });
       curRoot = leftChild;
     } else {
-      topDown.push({
-        sibling: leftChild,
-        targetIsRight: true,
-        parent: curRoot,
-      });
+      topDown.push({ targetIsRight: true, parent: curRoot });
       curRoot = rightChild;
     }
     curHeight -= 1;
@@ -417,7 +412,7 @@ export async function verifyInclusionValue(
     !ok(root) ||
     !ok(value) ||
     leaves === undefined ||
-    size >= BigInt(MAX_MMR_SIZE) ||
+    size >= MAX_MMR_SIZE ||
     leafIndex < 0n ||
     leafIndex >= leaves ||
     proof.some((x) => !ok(x))
@@ -476,7 +471,7 @@ export async function verifyConsistency(
     !a ||
     b === undefined ||
     proof.oldSize > proof.newSize ||
-    proof.newSize >= BigInt(MAX_MMR_SIZE) ||
+    proof.newSize >= MAX_MMR_SIZE ||
     proof.witness.length !== proof.oldPeaks.length ||
     proof.oldPeaks.some((x) => !ok(x)) ||
     proof.newPeaks.some((x) => !ok(x))
@@ -503,8 +498,8 @@ export async function verifyConsistency(
     let v = proof.oldPeaks[j]!,
       k = 0;
     for (const step of steps) {
-      const x = proof.witness[j]![k++]!;
-      if (!ok(x)) return false;
+      const x = proof.witness[j]![k++];
+      if (!x || !ok(x)) return false;
       v = step.targetIsRight
         ? await parent(hash, x, v, step.parent)
         : await parent(hash, v, x, step.parent);
@@ -602,7 +597,12 @@ export async function verifyRange(
       return false;
     // MAX_MMR_SIZE parity with the Python reference (core.verify_range rejects
     // size >= 2**50) — refuse absurd sizes before any traversal.
-    if (size < 0n || size >= 2n ** 50n || fromIndex < 0n || toIndex < fromIndex)
+    if (
+      size < 0n ||
+      size >= MAX_MMR_SIZE ||
+      fromIndex < 0n ||
+      toIndex < fromIndex
+    )
       return false;
     if (!Array.isArray(proof.witness) || !Array.isArray(bodyDigests))
       return false;
