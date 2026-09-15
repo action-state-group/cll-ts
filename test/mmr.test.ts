@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   commitmentObject,
   MmrTree,
+  rootFromPeaks,
   verifyConsistency,
   verifyHexInclusion,
   verifyInclusionValue,
+  verifyRange,
 } from "../src/index.js";
 
 const vectors = JSON.parse(
@@ -126,5 +128,59 @@ describe("CLL MMR", () => {
       Array.from({ length: 24 }, (_, index) => entry(index)),
     );
     expect(encoded.subarray(0, 2)).toEqual(Uint8Array.of(0x98, 0x18));
+  });
+
+  // The three pure verifiers derive peaks and the fold path arithmetically
+  // (O(log size)), never the O(size) full-tree shape(). A crafted enormous
+  // `size` from an untrusted proof must therefore be rejected promptly instead
+  // of allocating a tree with billions of nodes and hanging the (browser)
+  // verifier. Each case uses a valid MMR size near 2**50 with a deliberately
+  // short/empty proof: the arithmetic path finishes essentially instantly and
+  // returns false, so the tight timeout fails the test if O(size) ever returns.
+  describe("reject an oversized MMR size without O(size) work", () => {
+    // Perfect single-peak tree of 2**48 leaves -> size 2**49 - 1 (< 2**50).
+    const hugeSize = 2n ** 49n - 1n;
+
+    it("verifyInclusionValue", async () => {
+      expect(
+        await verifyInclusionValue(entry(1), hugeSize, 0n, entry(0), []),
+      ).toBe(false);
+    }, 2000);
+
+    it("verifyRange", async () => {
+      expect(
+        await verifyRange(entry(1), hugeSize, 0n, 0n, [entry(0)], {
+          v: 1,
+          kind: "range",
+          size: Number(hugeSize),
+          from_index: 0,
+          to_index: 0,
+          witness: [],
+        }),
+      ).toBe(false);
+    }, 2000);
+
+    it("verifyConsistency", async () => {
+      // old: 2**40 leaves (size 2**41 - 1); new: 2**45 leaves (size 2**46 - 1).
+      const oldSize = 2n ** 41n - 1n;
+      const newSize = 2n ** 46n - 1n;
+      const peak = entry(9);
+      const root = await rootFromPeaks([peak]);
+      expect(
+        await verifyConsistency(root, root, {
+          oldSize,
+          newSize,
+          oldPeaks: [peak],
+          witness: [[]],
+          newPeaks: [peak],
+        }),
+      ).toBe(false);
+    }, 2000);
+
+    it("verifyInclusionValue rejects size >= 2**50 at the bound", async () => {
+      expect(
+        await verifyInclusionValue(entry(1), 2n ** 50n, 0n, entry(0), []),
+      ).toBe(false);
+    }, 2000);
   });
 });
