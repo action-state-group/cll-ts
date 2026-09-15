@@ -5,6 +5,15 @@ stores opaque 32-byte entry values, builds an append-only Merkle Mountain Range,
 signs checkpoints, and delivers them to witnesses. It does not interpret the
 records whose identities are appended.
 
+This is by decision, not omission. The Python reference
+(`checkpointed-local-log`) additionally ships a **ledger layer** — three-state
+admission control, segment manifests, a lookup index, and a key-revocation
+timeline — that is intentionally **not** part of this TypeScript library, which
+is the checkpoint + MMR + storage substrate only. Admission and revocation
+semantics are Python-only unless a TypeScript consumer's demonstrated need
+reopens that as a separate decision. See `checkpointed-local-log`'s README,
+"Cross-language scope".
+
 ## Install
 
 Node.js 22 or newer is required.
@@ -161,9 +170,9 @@ import {
 
 const tree = new MmrTree();
 const identity = "ab".repeat(32);
-tree.appendHexIdentity(identity);
-const proof = tree.inclusionProof(0n);
-verifyHexInclusion(tree.root(), tree.size, 0n, identity, proof);
+await tree.appendHexIdentity(identity);
+const proof = await tree.inclusionProof(0n);
+await verifyHexInclusion(await tree.root(), tree.size, 0n, identity, proof);
 
 const metadata = checkpointMetadata(signedCheckpointBytes);
 const witnessEntryHash = checkpointEntryHash(signedCheckpointBytes);

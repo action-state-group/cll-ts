@@ -1,6 +1,12 @@
 import { defineConfig } from "tsup";
 export default defineConfig({
-  entry: ["src/index.ts", "src/jsonl.ts", "src/sqlite.ts", "src/mysql.ts"],
+  entry: [
+    "src/index.ts",
+    "src/browser.ts",
+    "src/jsonl.ts",
+    "src/sqlite.ts",
+    "src/mysql.ts",
+  ],
   format: ["esm"],
   dts: false,
   sourcemap: true,

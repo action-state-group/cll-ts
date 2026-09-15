@@ -254,7 +254,7 @@ export class WitnessDeliveryRunner {
     let next: WitnessState;
     let completed = 0;
     try {
-      if (!verifyCheckpoint(item.checkpoint))
+      if (!(await verifyCheckpoint(item.checkpoint)))
         throw new CllError(
           "corrupt",
           "stored checkpoint failed offline verification",
@@ -267,7 +267,7 @@ export class WitnessDeliveryRunner {
       const receipt = await client.submit(item.checkpoint, signal);
       let verified = false;
       try {
-        verified = verifier.verify(item.checkpoint, receipt);
+        verified = await verifier.verify(item.checkpoint, receipt);
       } catch (error) {
         throw new CllError("rejected", "witness receipt verifier failed", {
           cause: error,

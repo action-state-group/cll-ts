@@ -13,13 +13,13 @@ import {
 const identity = createCheckpointIdentity(new Uint8Array(32));
 const canonical = (value: unknown): Uint8Array =>
   encode(value, rfc8949EncodeOptions);
-const firstTree = (): MmrTree => {
+const firstTree = async (): Promise<MmrTree> => {
   const tree = new MmrTree();
-  tree.append(Buffer.from("11".repeat(32), "hex"));
+  await tree.append(Buffer.from("11".repeat(32), "hex"));
   return tree;
 };
-const firstCheckpoint = (timestamp = "2026-09-01T12:34:56Z") => {
-  const tree = firstTree();
+const firstCheckpoint = async (timestamp = "2026-09-01T12:34:56Z") => {
+  const tree = await firstTree();
   return signCheckpoint({
     logId: "negative-test",
     mmrSize: tree.size,
@@ -62,8 +62,8 @@ function authenticatedMutation(
 }
 
 describe("checkpoint verifier negative boundaries", () => {
-  it("rejects an indefinite-length non-canonical COSE array", () => {
-    const checkpoint = firstCheckpoint();
+  it("rejects an indefinite-length non-canonical COSE array", async () => {
+    const checkpoint = await firstCheckpoint();
     const items = decode(checkpoint.cose.subarray(1), {
       allowIndefinite: false,
       useMaps: true,
@@ -73,20 +73,20 @@ describe("checkpoint verifier negative boundaries", () => {
       ...items.map((item) => canonical(item)),
       Uint8Array.of(0xff),
     ]);
-    expect(verifyCheckpoint(indefinite)).toBe(false);
+    expect(await verifyCheckpoint(indefinite)).toBe(false);
   });
 
-  it("rejects authenticated protected-header and CWT errors", () => {
-    const checkpoint = firstCheckpoint();
+  it("rejects authenticated protected-header and CWT errors", async () => {
+    const checkpoint = await firstCheckpoint();
     expect(
-      verifyCheckpoint(
+      await verifyCheckpoint(
         authenticatedMutation(checkpoint, (headers) => {
           headers.set(3, "application/not-a-checkpoint");
         }),
       ),
     ).toBe(false);
     expect(
-      verifyCheckpoint(
+      await verifyCheckpoint(
         authenticatedMutation(checkpoint, (headers) => {
           (headers.get(15) as Map<number, unknown>).set(2, "wrong#1");
         }),
@@ -94,10 +94,10 @@ describe("checkpoint verifier negative boundaries", () => {
     ).toBe(false);
   });
 
-  it("rejects an authenticated commitment inconsistent with log size", () => {
-    const checkpoint = firstCheckpoint();
+  it("rejects an authenticated commitment inconsistent with log size", async () => {
+    const checkpoint = await firstCheckpoint();
     expect(
-      verifyCheckpoint(
+      await verifyCheckpoint(
         authenticatedMutation(checkpoint, (_headers, claims) => {
           claims.set("commitment", canonical([]));
         }),
@@ -105,12 +105,12 @@ describe("checkpoint verifier negative boundaries", () => {
     ).toBe(false);
   });
 
-  it("rejects an authenticated invalid consistency proof", () => {
-    const tree = firstTree();
+  it("rejects an authenticated invalid consistency proof", async () => {
+    const tree = await firstTree();
     const previousPeaks = tree.peakHashes();
-    tree.append(Buffer.from("22".repeat(32), "hex"));
-    const proof = tree.consistencyProof(1n);
-    const checkpoint = signCheckpoint({
+    await tree.append(Buffer.from("22".repeat(32), "hex"));
+    const proof = await tree.consistencyProof(1n);
+    const checkpoint = await signCheckpoint({
       logId: "negative-test",
       mmrSize: tree.size,
       peaks: tree.peakHashes(),
@@ -126,9 +126,9 @@ describe("checkpoint verifier negative boundaries", () => {
         newPeaks: proof.newPeaks,
       },
     });
-    expect(verifyCheckpoint(checkpoint.cose)).toBe(true);
+    expect(await verifyCheckpoint(checkpoint.cose)).toBe(true);
     expect(
-      verifyCheckpoint(
+      await verifyCheckpoint(
         authenticatedMutation(checkpoint, (_headers, claims) => {
           const consistency = claims.get("consistency_proof") as Map<
             string,
@@ -140,18 +140,18 @@ describe("checkpoint verifier negative boundaries", () => {
     ).toBe(false);
   });
 
-  it("preserves and verifies microsecond timestamps", () => {
-    const checkpoint = firstCheckpoint("2026-09-01T12:34:56.123456Z");
+  it("preserves and verifies microsecond timestamps", async () => {
+    const checkpoint = await firstCheckpoint("2026-09-01T12:34:56.123456Z");
     expect(checkpoint.timestamp).toBe("2026-09-01T12:34:56.123456Z");
-    expect(verifyCheckpoint(checkpoint.cose)).toBe(true);
+    expect(await verifyCheckpoint(checkpoint.cose)).toBe(true);
   });
 
-  it("renders checkpoint fractions with Go RFC3339Nano trimming", () => {
-    const checkpoint = firstCheckpoint("2026-09-01T12:34:56.836000Z");
+  it("renders checkpoint fractions with Go RFC3339Nano trimming", async () => {
+    const checkpoint = await firstCheckpoint("2026-09-01T12:34:56.836000Z");
     expect(checkpoint.timestamp).toBe("2026-09-01T12:34:56.836Z");
     expect(Buffer.from(checkpoint.json).toString()).toContain(
       '"timestamp":"2026-09-01T12:34:56.836Z"',
     );
-    expect(verifyCheckpoint(checkpoint.cose)).toBe(true);
+    expect(await verifyCheckpoint(checkpoint.cose)).toBe(true);
   });
 });
