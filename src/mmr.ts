@@ -95,6 +95,95 @@ function path(
   }
   return r;
 }
+// Arithmetic MMR geometry — O(log size) peak and path derivation used by the
+// pure verifiers, mirroring the Python reference (cll.checkpoint.core: peaks,
+// height_at, node_count, _find_containing_peak, _locate_path) and cll-go
+// (peakPositions / containingPeak / pathToPeak). shape() above stays O(size)
+// but only runs producer-side over a tree that already holds every node; a
+// verifier must never allocate O(size) from an attacker-supplied `size`, so it
+// derives just the peaks and the single fold path it needs from these instead.
+const MAX_MMR_SIZE = 2n ** 50n;
+// Witness hashes are consumed positionally (bottom-up), so a step only needs
+// which side the running value is on and the parent position for interior_hash;
+// the sibling's own position is never read, unlike the reference generators.
+type PathStep = { targetIsRight: boolean; parent: number };
+// Height (0 = leaf level) of the node at 0-indexed post-order position `pos`.
+function heightAt(pos: number): number {
+  let pos1 = pos + 1,
+    h = 0;
+  while (2 ** (h + 1) - 1 < pos1) h += 1;
+  while (h > 0) {
+    if (pos1 === 2 ** (h + 1) - 1) return h;
+    const leftSize = 2 ** h - 1;
+    if (pos1 > leftSize) pos1 -= leftSize;
+    h -= 1;
+  }
+  return 0;
+}
+// node_count(f) = 2f - popcount(f): the total node count of an f-leaf MMR, and
+// equivalently the 0-indexed position of the f-th leaf.
+function nodeCount(leaves: number): number {
+  let bits = 0;
+  for (let n = leaves; n > 0; n = Math.floor(n / 2)) bits += n & 1;
+  return 2 * leaves - bits;
+}
+// Peak node positions (left to right) of an MMR with `size` nodes. O(log size).
+// A valid MMR size decomposes into strictly-decreasing "mountain" sizes
+// 2^(h+1)-1; a size that fails to decompose (an in-progress/incomplete parent)
+// stops early, and the caller's length and root checks then fail closed.
+function peakPositions(size: number): number[] {
+  const result: number[] = [];
+  let remaining = size,
+    offset = 0,
+    prevHeight = Number.POSITIVE_INFINITY;
+  while (remaining > 0) {
+    let h = 0;
+    while (2 ** (h + 2) - 1 <= remaining) h += 1;
+    if (h >= prevHeight) break;
+    const mountain = 2 ** (h + 1) - 1;
+    offset += mountain;
+    result.push(offset - 1);
+    remaining -= mountain;
+    prevHeight = h;
+  }
+  return result;
+}
+// Index of the peak whose mountain contains node position `pos`, or -1.
+function findContainingPeak(pos: number, peaks: readonly number[]): number {
+  for (let i = 0; i < peaks.length; i += 1) {
+    const peakPos = peaks[i]!,
+      mountain = 2 ** (heightAt(peakPos) + 1) - 1;
+    if (peakPos - mountain + 1 <= pos && pos <= peakPos) return i;
+  }
+  return -1;
+}
+// Bottom-up sibling path from `target` up to (but excluding) the mountain root
+// at `rootPos` (height `height`). `target` need not be a leaf: consistency
+// walks from an old peak (an interior node of arbitrary height) up to the
+// containing new peak, so it stops as soon as the subtree root reaches target.
+function locatePath(
+  rootPos: number,
+  height: number,
+  target: number,
+): PathStep[] {
+  const topDown: PathStep[] = [];
+  let curRoot = rootPos,
+    curHeight = height;
+  while (curHeight > 0 && curRoot !== target) {
+    const leftChild = curRoot - (2 ** curHeight - 1) - 1,
+      rightChild = curRoot - 1;
+    if (target <= leftChild) {
+      topDown.push({ targetIsRight: false, parent: curRoot });
+      curRoot = leftChild;
+    } else {
+      topDown.push({ targetIsRight: true, parent: curRoot });
+      curRoot = rightChild;
+    }
+    curHeight -= 1;
+  }
+  topDown.reverse();
+  return topDown;
+}
 export function leafCount(size: bigint): bigint | undefined {
   if (size < 0n || size > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
   const count = (n: bigint) =>
@@ -323,32 +412,33 @@ export async function verifyInclusionValue(
     !ok(root) ||
     !ok(value) ||
     leaves === undefined ||
+    size >= MAX_MMR_SIZE ||
     leafIndex < 0n ||
     leafIndex >= leaves ||
     proof.some((x) => !ok(x))
   )
     return false;
-  const s = shape(Number(leaves)),
-    leaf = s.leaves[Number(leafIndex)]!;
-  let p = leaf,
-    v = await hash(Uint8Array.of(0), value),
+  const peaks = peakPositions(Number(size)),
+    leafPos = nodeCount(Number(leafIndex)),
+    peakIndex = findContainingPeak(leafPos, peaks);
+  if (peakIndex < 0) return false;
+  const peakPos = peaks[peakIndex]!,
+    steps = locatePath(peakPos, heightAt(peakPos), leafPos);
+  let v = await hash(Uint8Array.of(0), value),
     i = 0;
-  while (s.meta[p]!.parent !== undefined) {
-    const q = s.meta[p]!.parent!,
-      m = s.meta[q]!,
-      x = proof[i++];
+  for (const step of steps) {
+    const x = proof[i++];
     if (!x) return false;
-    v =
-      m.left === p ? await parent(hash, v, x, q) : await parent(hash, x, v, q);
-    p = q;
+    v = step.targetIsRight
+      ? await parent(hash, x, v, step.parent)
+      : await parent(hash, v, x, step.parent);
   }
-  const peak = s.peaks.indexOf(p);
-  if (peak < s.peaks.length - 1) {
+  if (peakIndex < peaks.length - 1) {
     const right = proof[i++];
     if (!right) return false;
     v = await hash(right, v);
   }
-  for (let left = peak - 1; left >= 0; left -= 1) {
+  for (let left = peakIndex - 1; left >= 0; left -= 1) {
     const item = proof[i++];
     if (!item) return false;
     v = await hash(v, item);
@@ -381,6 +471,7 @@ export async function verifyConsistency(
     !a ||
     b === undefined ||
     proof.oldSize > proof.newSize ||
+    proof.newSize >= MAX_MMR_SIZE ||
     proof.witness.length !== proof.oldPeaks.length ||
     proof.oldPeaks.some((x) => !ok(x)) ||
     proof.newPeaks.some((x) => !ok(x))
@@ -391,26 +482,29 @@ export async function verifyConsistency(
     !same(await rootFromPeaks(hash, proof.newPeaks), newRoot)
   )
     return false;
-  const old = shape(Number(a)),
-    next = shape(Number(b));
-  for (let j = 0; j < old.peaks.length; j += 1) {
-    let p = old.peaks[j]!,
-      v = proof.oldPeaks[j]!,
+  const oldPositions = peakPositions(Number(proof.oldSize)),
+    newPositions = peakPositions(Number(proof.newSize));
+  if (
+    proof.oldPeaks.length !== oldPositions.length ||
+    proof.newPeaks.length !== newPositions.length
+  )
+    return false;
+  for (let j = 0; j < oldPositions.length; j += 1) {
+    const containing = findContainingPeak(oldPositions[j]!, newPositions);
+    if (containing < 0) return false;
+    const newPeak = newPositions[containing]!,
+      steps = locatePath(newPeak, heightAt(newPeak), oldPositions[j]!);
+    if (steps.length !== proof.witness[j]!.length) return false;
+    let v = proof.oldPeaks[j]!,
       k = 0;
-    while (next.meta[p]!.parent !== undefined) {
-      const q = next.meta[p]!.parent!,
-        m = next.meta[q]!,
-        x = proof.witness[j]![k++];
+    for (const step of steps) {
+      const x = proof.witness[j]![k++];
       if (!x || !ok(x)) return false;
-      v =
-        m.left === p
-          ? await parent(hash, v, x, q)
-          : await parent(hash, x, v, q);
-      p = q;
+      v = step.targetIsRight
+        ? await parent(hash, x, v, step.parent)
+        : await parent(hash, v, x, step.parent);
     }
-    const peak = next.peaks.indexOf(p);
-    if (k !== proof.witness[j]!.length || !same(v, proof.newPeaks[peak]!))
-      return false;
+    if (!same(v, proof.newPeaks[containing]!)) return false;
   }
   return true;
 }
@@ -503,7 +597,12 @@ export async function verifyRange(
       return false;
     // MAX_MMR_SIZE parity with the Python reference (core.verify_range rejects
     // size >= 2**50) — refuse absurd sizes before any traversal.
-    if (size < 0n || size >= 2n ** 50n || fromIndex < 0n || toIndex < fromIndex)
+    if (
+      size < 0n ||
+      size >= MAX_MMR_SIZE ||
+      fromIndex < 0n ||
+      toIndex < fromIndex
+    )
       return false;
     if (!Array.isArray(proof.witness) || !Array.isArray(bodyDigests))
       return false;
@@ -517,7 +616,7 @@ export async function verifyRange(
       if (!b) return false;
       witnessBytes.push(b);
     }
-    const s = shape(Number(leaves)),
+    const peaks = peakPositions(Number(size)),
       lo = Number(fromIndex),
       hi = Number(toIndex),
       cursor = { index: 0 };
@@ -547,8 +646,8 @@ export async function verifyRange(
     };
     const reconstructedPeaks: Uint8Array[] = [];
     let leafStart = 0;
-    for (const p of s.peaks) {
-      const h = s.meta[p]!.height;
+    for (const p of peaks) {
+      const h = heightAt(p);
       reconstructedPeaks.push(await reconstruct(p, h, leafStart));
       leafStart += 2 ** h;
     }
