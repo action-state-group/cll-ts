@@ -4,3 +4,7 @@ coverage/
 .DS_Store
 *.sqlite
 *.jsonl
+
+# Local secrets: never commit an env file.
+.env
+.env.*
